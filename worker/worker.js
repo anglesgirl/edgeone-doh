@@ -9,9 +9,7 @@ const UPSTREAMS = [
   'https://cloudflare-dns.com/dns-query', // CF 公共 DoH（未墙但慢）
   'https://dns.google/resolve',           // Google 公共 DoH（dns-query 也支持）
 ];
-const KV_ECH_KEY = 'ech:config';
 const KV_ECH_TTL = 300; // 5 分钟
-const KV_GLOBAL_KEY = 'config:global'; // 全局配置：{fallbackIp, ech}
 
 // ---------- AS13335 (Cloudflare) 判断 ----------
 // 用 Team Cymru 反查（origin.asn.cymru.com TXT），官方 ips-v4 只是落地 IP 段，
@@ -235,22 +233,19 @@ function extractEchFromSVCB(rdata) {
   return null;
 }
 
-// 获取 ECH 配置（KV 缓存 → 上游查询）
+// 获取 ECH 配置（D1 缓存 → 上游查询）
 async function getECH(env) {
-  // KV 缓存
+  // D1 缓存
   try {
-    const cached = await env.KV.get(KV_ECH_KEY);
-    if (cached) {
-      const c = JSON.parse(cached);
-      if (Date.now() - c.ts < KV_ECH_TTL * 1000) return c.ech;
-    }
-  } catch (e) { /* KV 不可用则跳过 */ }
+    const row = await env.DB.prepare('SELECT ech, ts FROM ech_cache WHERE id = 1').first();
+    if (row && row.ech && Date.now() - row.ts < KV_ECH_TTL * 1000) return row.ech;
+  } catch (e) { /* D1 不可用则跳过 */ }
 
   const jr = await upstreamJSON(ECH_SOURCE, 65, env);
   const ech = extractEchFromJSON(jr);
   if (ech) {
     try {
-      await env.KV.put(KV_ECH_KEY, JSON.stringify({ ech, ts: Date.now() }));
+      await env.DB.prepare('UPDATE ech_cache SET ech = ?, ts = ? WHERE id = 1').bind(ech, Date.now()).run();
     } catch (e) { /* ignore */ }
   }
   return ech;
@@ -261,8 +256,8 @@ async function getECH(env) {
 // getGlobalConfig 读取全局配置 {fallbackIp, ech}
 async function getGlobalConfig(env) {
   try {
-    const raw = await env.KV.get(KV_GLOBAL_KEY);
-    if (raw) return JSON.parse(raw);
+    const row = await env.DB.prepare('SELECT fallback_ip, ech FROM config WHERE id = 1').first();
+    if (row) return { fallbackIp: row.fallback_ip || '', ech: !!row.ech };
   } catch (e) { /* ignore */ }
   return {};
 }
@@ -271,16 +266,16 @@ async function getGlobalConfig(env) {
 
 async function getRule(env, domain) {
   try {
-    const raw = await env.KV.get(`rule:${domain}`);
-    if (raw) return JSON.parse(raw);
+    const row = await env.DB.prepare('SELECT domain, ips, ech FROM rules WHERE domain = ?').bind(domain).first();
+    if (row) return { domain: row.domain, ips: JSON.parse(row.ips), ech: !!row.ech };
   } catch (e) { /* ignore */ }
   // 子域匹配：向上找
   let d = domain;
   while (d.includes('.')) {
     d = d.slice(d.indexOf('.') + 1);
     try {
-      const raw = await env.KV.get(`rule:${d}`);
-      if (raw) return JSON.parse(raw);
+      const row = await env.DB.prepare('SELECT domain, ips, ech FROM rules WHERE domain = ?').bind(d).first();
+      if (row) return { domain: row.domain, ips: JSON.parse(row.ips), ech: !!row.ech };
     } catch (e) { /* ignore */ }
   }
   return null;
@@ -483,16 +478,10 @@ function authAdmin(request, env) {
 }
 
 async function listRules(env) {
-  const idx = await env.KV.get('rules:index');
-  const domains = idx ? JSON.parse(idx) : [];
-  const rules = [];
-  for (const d of domains) {
-    try {
-      const raw = await env.KV.get(`rule:${d}`);
-      if (raw) rules.push(JSON.parse(raw));
-    } catch (e) { /* skip */ }
-  }
-  return rules;
+  try {
+    const { results } = await env.DB.prepare('SELECT domain, ips, ech FROM rules ORDER BY domain').all();
+    return (results || []).map(r => ({ domain: r.domain, ips: JSON.parse(r.ips), ech: !!r.ech }));
+  } catch (e) { return []; }
 }
 
 async function addRule(env, domain, ips, ech) {
@@ -504,30 +493,25 @@ async function addRule(env, domain, ips, ech) {
       return { ok: false, error: `invalid IP: ${ip}` };
     }
   }
-  const rule = { domain, ips, ech: !!ech };
-  await env.KV.put(`rule:${domain}`, JSON.stringify(rule));
-  const idxRaw = await env.KV.get('rules:index');
-  const idx = idxRaw ? JSON.parse(idxRaw) : [];
-  if (!idx.includes(domain)) idx.push(domain);
-  await env.KV.put('rules:index', JSON.stringify(idx));
+  try {
+    await env.DB.prepare('INSERT INTO rules (domain, ips, ech) VALUES (?, ?, ?) ON CONFLICT(domain) DO UPDATE SET ips = excluded.ips, ech = excluded.ech')
+      .bind(domain, JSON.stringify(ips), ech ? 1 : 0).run();
+  } catch (e) { return { ok: false, error: String(e) }; }
   return { ok: true };
 }
 
 async function delRule(env, domain) {
   domain = domain.trim().toLowerCase().replace(/\.$/, '');
-  await env.KV.delete(`rule:${domain}`);
-  const idxRaw = await env.KV.get('rules:index');
-  if (idxRaw) {
-    const idx = JSON.parse(idxRaw).filter(d => d !== domain);
-    await env.KV.put('rules:index', JSON.stringify(idx));
-  }
+  try {
+    await env.DB.prepare('DELETE FROM rules WHERE domain = ?').bind(domain).run();
+  } catch (e) { /* ignore */ }
   return { ok: true };
 }
 
 async function getGlobal(env) {
   try {
-    const raw = await env.KV.get(KV_GLOBAL_KEY);
-    if (raw) return JSON.parse(raw);
+    const row = await env.DB.prepare('SELECT fallback_ip, ech FROM config WHERE id = 1').first();
+    if (row) return { fallbackIp: row.fallback_ip || '', ech: !!row.ech };
   } catch (e) { /* ignore */ }
   return {};
 }
@@ -536,7 +520,10 @@ async function setGlobal(env, cfg) {
   const cur = await getGlobal(env);
   if (cfg.fallbackIp !== undefined) cur.fallbackIp = cfg.fallbackIp.trim() || '';
   if (cfg.ech !== undefined) cur.ech = !!cfg.ech;
-  await env.KV.put(KV_GLOBAL_KEY, JSON.stringify(cur));
+  try {
+    await env.DB.prepare('UPDATE config SET fallback_ip = ?, ech = ? WHERE id = 1')
+      .bind(cur.fallbackIp, cur.ech ? 1 : 0).run();
+  } catch (e) { /* ignore */ }
   return cur;
 }
 
