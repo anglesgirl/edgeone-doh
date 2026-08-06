@@ -357,15 +357,25 @@ async function handleRequest(request, env) {
     if (jr && jr.Answer) {
       answers = jsonToAnswers(qnameWire, qname, jr.Answer);
     }
-    // 全局配置：如果解析出的 IP 属于 Cloudflare (AS13335)，
+    // 全局配置：如果域名是 CF 托管（AS13335 或 CNAME 链指向 cloudflare），
     // 且配置了 fallbackIp → 替换为自定义 IP（换 CF 共享 IP 绕过封 IP）
     if (gcfg.fallbackIp && jr && jr.Answer) {
-      // 上游解析出的任一 A 记录 IP 属于 AS13335 → 替换为 fallbackIp
-      let upCF = false;
+      let isCF = false;
+      // 判定 1：任一 A 记录 IP 属于 AS13335
       for (const a of jr.Answer) {
-        if (a.type === 1 && await isCloudflareIP(a.data, env)) { upCF = true; break; }
+        if (a.type === 1 && await isCloudflareIP(a.data, env)) { isCF = true; break; }
       }
-      if (upCF) {
+      // 判定 2：CNAME 链指向 Cloudflare（*.cdn.cloudflare.net / *.cloudflare.net）
+      // 覆盖"CF 托管但 Geo DNS 返回非 CF IP"的域名（如 video.twimg.com → Fastly IP）
+      if (!isCF) {
+        for (const a of jr.Answer) {
+          if (a.type === 5 && typeof a.data === 'string' &&
+              /(^|\.)cdn\.cloudflare\.net\.?$|(^|\.)cloudflare\.net\.?$|(^|\.)workers\.dev\.?$/i.test(a.data)) {
+            isCF = true; break;
+          }
+        }
+      }
+      if (isCF) {
         answers = buildAAnswer(qnameWire, qtype, [gcfg.fallbackIp], 300);
       }
     }
@@ -375,11 +385,19 @@ async function handleRequest(request, env) {
     if (rule && rule.ech) {
       injectECH = true;
     } else {
-      // 未命中手动规则：查 A 记录判断是否 CF 托管（AS13335 反查）
+      // 未命中手动规则：查 A 记录判断是否 CF 托管（AS13335 反查 + CNAME 链）
       const jrA = await upstreamJSON(qname, 1, env);
       if (jrA && jrA.Answer) {
         for (const a of jrA.Answer) {
           if (a.type === 1 && await isCloudflareIP(a.data, env)) { injectECH = true; break; }
+        }
+        if (!injectECH) {
+          for (const a of jrA.Answer) {
+            if (a.type === 5 && typeof a.data === 'string' &&
+                /(^|\.)cdn\.cloudflare\.net\.?$|(^|\.)cloudflare\.net\.?$|(^|\.)workers\.dev\.?$/i.test(a.data)) {
+              injectECH = true; break;
+            }
+          }
         }
       }
     }
