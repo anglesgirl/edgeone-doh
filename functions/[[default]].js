@@ -4,6 +4,97 @@
 // 上游：CF Gateway DoH（海外节点可达）
 // ECH：从 cloudflare-ech.com 的 HTTPS 记录获取（缓存到 KV）
 
+// ===== Buffer polyfill（EdgeOne 运行时无 Node Buffer，纯 Web 环境）=====
+// 只实现本项目用到的操作：alloc / from / concat / writeUInt16BE / writeUInt32BE / readUInt16BE / slice / toString
+class Buffer {
+  constructor(arr) { this.data = new Uint8Array(arr); }
+  static alloc(n) { return new Buffer(new Uint8Array(n)); }
+  static from(x, enc) {
+    if (typeof x === 'string') {
+      if (enc === 'base64') {
+        // base64 → bytes（Web 原生）
+        const bin = atob(x);
+        const u = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+        return new Buffer(u);
+      }
+      if (enc === 'hex') {
+        const clean = x.replace(/\s+/g, '');
+        const u = new Uint8Array(clean.length / 2);
+        for (let i = 0; i < u.length; i++) u[i] = parseInt(clean.substr(i * 2, 2), 16);
+        return new Buffer(u);
+      }
+      // ascii / utf8 默认
+      const u = new Uint8Array(x.length);
+      for (let i = 0; i < x.length; i++) u[i] = x.charCodeAt(i) & 0xff;
+      return new Buffer(u);
+    }
+    if (x instanceof Uint8Array) return new Buffer(x);
+    if (x instanceof ArrayBuffer) return new Buffer(new Uint8Array(x));
+    if (Array.isArray(x)) return new Buffer(new Uint8Array(x));
+    if (x instanceof Buffer) return new Buffer(x.data);
+    throw new Error('Buffer.from unsupported: ' + typeof x);
+  }
+  static concat(list) {
+    let total = 0;
+    for (const b of list) total += b.length;
+    const u = new Uint8Array(total);
+    let off = 0;
+    for (const b of list) { u.set(b.data, off); off += b.length; }
+    return new Buffer(u);
+  }
+  get length() { return this.data.length; }
+  writeUInt16BE(v, off) {
+    this.data[off] = (v >> 8) & 0xff;
+    this.data[off + 1] = v & 0xff;
+  }
+  writeUInt32BE(v, off) {
+    this.data[off] = (v >>> 24) & 0xff;
+    this.data[off + 1] = (v >>> 16) & 0xff;
+    this.data[off + 2] = (v >>> 8) & 0xff;
+    this.data[off + 3] = v & 0xff;
+  }
+  readUInt16BE(off) {
+    return ((this.data[off] << 8) | this.data[off + 1]) >>> 0;
+  }
+  readUInt32BE(off) {
+    return ((this.data[off] << 24) | (this.data[off + 1] << 16) | (this.data[off + 2] << 8) | this.data[off + 3]) >>> 0;
+  }
+  slice(a, b) { return new Buffer(this.data.slice(a, b)); }
+  toString(enc) {
+    if (enc === 'hex') {
+      let s = '';
+      for (const x of this.data) s += x.toString(16).padStart(2, '0');
+      return s;
+    }
+    let s = '';
+    for (const x of this.data) s += String.fromCharCode(x);
+    return s;
+  }
+  [Symbol.iterator]() { return this.data[Symbol.iterator](); }
+}
+
+// atob polyfill（如果运行时没有）
+if (typeof atob !== 'function') {
+  globalThis.atob = (s) => {
+    const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let out = '';
+    let buf = 0, bits = 0;
+    for (const c of s) {
+      if (c === '=') break;
+      const v = b64.indexOf(c);
+      if (v < 0) continue;
+      buf = (buf << 6) | v;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out += String.fromCharCode((buf >> bits) & 0xff);
+      }
+    }
+    return out;
+  };
+}
+
 const ECH_SOURCE = 'cloudflare-ech.com';
 const UPSTREAMS = [
   'https://cloudflare-dns.com/dns-query', // CF 公共 DoH（未墙但慢）
@@ -289,6 +380,18 @@ async function getRule(env, domain) {
 // ---------- 主处理 ----------
 
 export async function onRequest({ request, env }) {
+  try {
+    return await handleRequest(request, env);
+  } catch (e) {
+    // 返回错误详情便于调试（EdgeOne 545 看不到堆栈）
+    return new Response(JSON.stringify({ error: String(e), stack: String(e && e.stack || '') }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+}
+
+async function handleRequest(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
 
