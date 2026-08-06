@@ -206,7 +206,17 @@ function extractEchFromJSON(jr) {
     }
     // alidns 文本格式: '1 . alpn="h3,h2" ipv4hint="..." ech="AEX+..."'
     const m = d.match(/ech="([A-Za-z0-9+/=]+)"/);
-    if (m) return m[1];
+    if (m) {
+      const raw = Buffer.from(m[1], 'base64');
+      // 同样剥掉 2 字节长度前缀（alidns 的 ech= 也带 len 前缀）
+      if (raw.length >= 4) {
+        const prefix = raw.readUInt16BE(0);
+        if (prefix === raw.length - 2 && raw[2] === 0xfe && raw[3] === 0x0d) {
+          return raw.slice(2).toString('base64');
+        }
+      }
+      return m[1];
+    }
   }
   return null;
 }
@@ -227,7 +237,19 @@ function extractEchFromSVCB(rdata) {
     const len = rdata.readUInt16BE(pos + 2);
     pos += 4;
     if (pos + len > rdata.length) return null;
-    if (key === 5) return rdata.slice(pos, pos + len);
+    if (key === 5) {
+      let ech = rdata.slice(pos, pos + len);
+      // 关键：上游（CF Gateway/alidns）返回的 ech= 值带 2 字节长度前缀
+      // （len + ECHConfigList），Chrome 需要纯 ECHConfigList（fe0d 开头）。
+      // 若前 2 字节 == 总长-2，则剥掉。
+      if (ech.length >= 4) {
+        const prefix = ech.readUInt16BE(0);
+        if (prefix === ech.length - 2 && ech[2] === 0xfe && ech[3] === 0x0d) {
+          ech = ech.slice(2);
+        }
+      }
+      return ech;
+    }
     pos += len;
   }
   return null;
