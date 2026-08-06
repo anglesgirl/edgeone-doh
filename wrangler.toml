@@ -2,6 +2,10 @@ name = "ech-doh"
 main = "worker/worker.js"
 compatibility_date = "2026-08-06"
 
+routes = [
+  { pattern = "doh.anglesgirl.eu.org", zone_id = "37b9971408dfc72517e34d4ea6ac9393" }
+]
+
 # KV 绑定（Cloudflare Workers KV，变量名 KV）
 [[kv_namespaces]]
 binding = "KV"
@@ -10,4 +14,4 @@ id = "cafe158e4dfc458d88e6e7ba452276cf"
 # 环境变量
 [vars]
 ADMIN_TOKEN = "doh-admin-7f3k9"
-DOH_DOMAIN = "ech-doh.anglesgirl.workers.dev"
+DOH_DOMAIN = "doh.anglesgirl.eu.org"
