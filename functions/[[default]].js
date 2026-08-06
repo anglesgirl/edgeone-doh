@@ -513,7 +513,7 @@ async function handleRequest(request, env) {
     });
   }
 
-  return new Response(respBuf, {
+  return new Response(respBuf.data, {
     headers: {
       'content-type': 'application/dns-message',
       'cache-control': 'max-age=300',
