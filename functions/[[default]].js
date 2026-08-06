@@ -566,7 +566,8 @@ function authAdmin(request, env) {
   const url = new URL(request.url);
   const h = request.headers.get('X-Admin-Token');
   const q = url.searchParams.get('token');
-  const token = (env && env.ADMIN_TOKEN) || 'changeme';
+  // 默认 token（环境变量优先，未设置时用内置值）
+  const token = (env && env.ADMIN_TOKEN) || 'doh-admin-7f3k9';
   return (h === token) || (q === token);
 }
 
@@ -787,7 +788,7 @@ async function handleAdmin(request, env, url) {
 // ==================== iOS 描述文件 ====================
 
 async function handleProfile(env) {
-  const dohDomain = (env && env.DOH_DOMAIN) || 'your-doh-domain.example.com';
+  const dohDomain = (env && env.DOH_DOMAIN) || 'edgeone-doh.edgeone.cool';
   const uuid = () => {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const r = (Math.random() * 16) | 0;
