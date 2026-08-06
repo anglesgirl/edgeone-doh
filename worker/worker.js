@@ -565,6 +565,15 @@ label{display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8;margi
 <h1>🛡️ ECH DoH 管理后台</h1>
 <div class="sub">EdgeOne Pages · 免服务器 DoH · 规则注入 + ECH + AS13335 自动替换</div>
 
+<h2>🔑 管理令牌</h2>
+<div class="card">
+  <div class="row">
+    <input id="tokenInput" placeholder="输入管理 Token 后点击保存" style="flex:2">
+    <button onclick="saveToken()" style="flex:0;white-space:nowrap">保存 Token</button>
+  </div>
+  <div class="tip" id="tokenStatus">首次进入请在此输入管理 Token（默认 <span class="code">doh-admin-7f3k9</span>，如部署时改过环境变量 ADMIN_TOKEN 则用你设置的值）。</div>
+</div>
+
 <h2>🌐 全局配置（AS13335 自动替换）</h2>
 <div class="card">
   <div class="row">
@@ -596,15 +605,33 @@ label{display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8;margi
 
 <script>
 let TOKEN = localStorage.getItem('doh_token') || '';
-(async () => {
-  const t = prompt('管理 Token：');
-  if (t) { TOKEN = t; localStorage.setItem('doh_token', t); }
-})();
+function saveToken() {
+  const t = document.getElementById('tokenInput').value.trim();
+  if (t) {
+    TOKEN = t;
+    localStorage.setItem('doh_token', t);
+    document.getElementById('tokenStatus').textContent = '✅ Token 已保存：' + t;
+    refresh();
+  } else {
+    document.getElementById('tokenStatus').textContent = '❌ 请输入 Token';
+  }
+}
+window.saveToken = saveToken;
+document.addEventListener('DOMContentLoaded', () => {
+  if (TOKEN) {
+    document.getElementById('tokenInput').value = TOKEN;
+    document.getElementById('tokenStatus').textContent = '已使用保存的 Token：' + TOKEN;
+  }
+});
 async function api(path, opts={}) {
   opts.headers = Object.assign({'X-Admin-Token': TOKEN}, opts.headers||{});
   if (opts.body) opts.headers['Content-Type'] = 'application/json';
   const r = await fetch(path, opts);
-  if (r.status === 401) { document.getElementById('status').textContent = '❌ 未授权，请刷新页重新输入 Token'; return null; }
+  if (r.status === 401) {
+    const ts = document.getElementById('tokenStatus');
+    if (ts) ts.textContent = '❌ Token 无效，请在"管理令牌"处重新输入';
+    return null;
+  }
   return r.json();
 }
 async function refresh() {
@@ -638,7 +665,10 @@ async function saveGlobal() {
   document.getElementById('status').textContent = d && d.ok ? '✅ 已保存全局配置' : '❌ 保存失败';
   refresh();
 }
-refresh();
+// DOM 加载完再刷新（避免元素未就绪）
+document.addEventListener('DOMContentLoaded', () => {
+  if (TOKEN) refresh();
+});
 </script></body></html>`;
 }
 
