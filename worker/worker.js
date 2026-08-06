@@ -287,11 +287,14 @@ async function getGlobalConfig(env) {
 // ---------- 规则管理 ----------
 
 async function getRule(env, domain) {
+  // 查询的域名去掉尾点
+  domain = domain.replace(/\.$/, '');
+  // 直接查（含通配符规则：rule 里存的是裸域名，向上匹配覆盖子域）
   try {
     const row = await env.DB.prepare('SELECT domain, ips, ech FROM rules WHERE domain = ?').bind(domain).first();
     if (row) return { domain: row.domain, ips: JSON.parse(row.ips), ech: !!row.ech };
   } catch (e) { /* ignore */ }
-  // 子域匹配：向上找
+  // 子域匹配：向上找（a.b.c.com → b.c.com → c.com，命中即覆盖整棵子树）
   let d = domain;
   while (d.includes('.')) {
     d = d.slice(d.indexOf('.') + 1);
@@ -527,6 +530,13 @@ async function listRules(env) {
 async function addRule(env, domain, ips, ech) {
   domain = domain.trim().toLowerCase().replace(/\.$/, '');
   if (!domain) return { ok: false, error: 'domain empty' };
+  // 通配符支持：*.cloudflare.com 或 .cloudflare.com → 存 cloudflare.com（向上匹配覆盖所有子域）
+  if (domain.startsWith('*.')) domain = domain.slice(2);
+  if (domain.startsWith('.')) domain = domain.slice(1);
+  // 校验：必须是合法域名（至少两段，字母数字连字符点）
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
+    return { ok: false, error: `invalid domain: ${domain}` };
+  }
   for (const ip of ips) {
     const parts = ip.split('.').map(Number);
     if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
@@ -537,11 +547,13 @@ async function addRule(env, domain, ips, ech) {
     await env.DB.prepare('INSERT INTO rules (domain, ips, ech) VALUES (?, ?, ?) ON CONFLICT(domain) DO UPDATE SET ips = excluded.ips, ech = excluded.ech')
       .bind(domain, JSON.stringify(ips), ech ? 1 : 0).run();
   } catch (e) { return { ok: false, error: String(e) }; }
-  return { ok: true };
+  return { ok: true, normalized: domain };
 }
 
 async function delRule(env, domain) {
   domain = domain.trim().toLowerCase().replace(/\.$/, '');
+  if (domain.startsWith('*.')) domain = domain.slice(2);
+  if (domain.startsWith('.')) domain = domain.slice(1);
   try {
     await env.DB.prepare('DELETE FROM rules WHERE domain = ?').bind(domain).run();
   } catch (e) { /* ignore */ }
@@ -615,7 +627,7 @@ label{display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8;margi
 <h2>➕ 添加规则（手动指定域名 → IP）</h2>
 <div class="card">
   <div class="row">
-    <input id="domain" placeholder="域名，如 archiveofourown.org">
+    <input id="domain" placeholder="域名，如 archiveofourown.org（支持通配符 *.example.com 覆盖所有子域）">
     <input id="ips" placeholder="IP（逗号分隔，如 172.67.187.141,104.20.9.2）">
   </div>
   <label><input type="checkbox" id="ech" checked style="width:auto"> 注入 ECH</label>
