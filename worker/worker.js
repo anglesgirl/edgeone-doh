@@ -626,8 +626,13 @@ async function refresh() {
   if (!d) return;
   const tb = document.getElementById('rules');
   tb.innerHTML = (d.rules||[]).map(r =>
-    '<tr><td>'+r.domain+'</td><td class="code">'+r.ips.join(', ')+'</td><td>'+(r.ech?'✅':'—')+'</td><td><a onclick="del(\''+r.domain+'\')">删除</a></td></tr>'
+    '<tr><td>'+r.domain+'</td><td class="code">'+r.ips.join(', ')+'</td><td>'+(r.ech?'✅':'—')+'</td><td><button class="delbtn" data-d="'+encodeURIComponent(r.domain)+'">删除</button></td></tr>'
   ).join('');
+  // 事件委托：点击删除按钮
+  tb.onclick = (e) => {
+    const btn = e.target.closest('.delbtn');
+    if (btn) del(decodeURIComponent(btn.dataset.d));
+  };
   const g = await api('/admin/config');
   if (g && g.fallbackIp) document.getElementById('fbIp').value = g.fallbackIp;
   if (g && g.ech !== undefined) document.getElementById('gbEch').checked = g.ech;
