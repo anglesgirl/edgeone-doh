@@ -11,6 +11,44 @@ const UPSTREAMS = [
 ];
 const KV_ECH_KEY = 'ech:config';
 const KV_ECH_TTL = 300; // 5 分钟
+const KV_GLOBAL_KEY = 'config:global'; // 全局配置：{fallbackIp, ech}
+
+// ---------- AS13335 (Cloudflare) 判断 ----------
+// 用 Team Cymru 反查（origin.asn.cymru.com TXT），官方 ips-v4 只是落地 IP 段，
+// 不是 AS13335 完整前缀集（实际有 2400+ 前缀），不能用于判断"IP 属于 CF"。
+
+// ipAsnCache：内存缓存 IP → ASN（避免重复反查）
+const ipAsnCache = new Map();
+const IP_ASN_TTL = 3600 * 1000; // 1 小时
+
+// lookupASN：反查 IP 的 ASN（通过 DoH JSON 查 TXT）
+async function lookupASN(ipStr, env) {
+  const now = Date.now();
+  const cached = ipAsnCache.get(ipStr);
+  if (cached && now - cached.ts < IP_ASN_TTL) return cached.asn;
+
+  // Team Cymru：d.c.b.a.origin.asn.cymru.com → TXT "AS13335 | ..."
+  const parts = ipStr.split('.');
+  const reversed = parts.slice().reverse().join('.');
+  const name = `${reversed}.origin.asn.cymru.com`;
+  const jr = await upstreamJSON(name, 16, env); // 16 = TXT
+  let asn = '';
+  if (jr && jr.Answer) {
+    for (const a of jr.Answer) {
+      if (a.type !== 16 || !a.data) continue;
+      const m = a.data.match(/(\d+)\s*\|/);
+      if (m) { asn = m[1]; break; }
+    }
+  }
+  ipAsnCache.set(ipStr, { asn, ts: now });
+  return asn;
+}
+
+// isCloudflareIP：判断 IP 是否属于 AS13335
+async function isCloudflareIP(ipStr, env) {
+  const asn = await lookupASN(ipStr, env);
+  return asn === '13335';
+}
 
 // ---------- DNS wire format 编解码 ----------
 
@@ -218,6 +256,17 @@ async function getECH(env) {
   return ech;
 }
 
+// ---------- 全局配置 ----------
+
+// getGlobalConfig 读取全局配置 {fallbackIp, ech}
+async function getGlobalConfig(env) {
+  try {
+    const raw = await env.KV.get(KV_GLOBAL_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) { /* ignore */ }
+  return {};
+}
+
 // ---------- 规则管理 ----------
 
 async function getRule(env, domain) {
@@ -280,19 +329,58 @@ export async function onRequest({ request, env }) {
 
   // 规则命中？
   const rule = await getRule(env, qname.toLowerCase());
+  const gcfg = await getGlobalConfig(env);
   let answers = [];
 
   if (rule && rule.ips && rule.ips.length > 0 && qtype === 1) {
-    // A 记录：返回自定义 IP
+    // 手动规则命中 A 记录：返回自定义 IP
     answers = buildAAnswer(qnameWire, qtype, rule.ips, 300);
-  } else if (rule && rule.ech && qtype === 65) {
-    // HTTPS 记录：注入 ECH
-    const ech = await getECH(env);
-    if (ech) {
-      answers = buildHTTPSAnswer(qnameWire, ech, 300);
+  } else if (qtype === 1) {
+    // 未命中手动规则 → 上游解析，然后检查是否 AS13335
+    const jr = await upstreamJSON(qname, qtype, env);
+    if (jr && jr.Answer) {
+      answers = jsonToAnswers(qnameWire, qname, jr.Answer);
+    }
+    // 全局配置：如果解析出的 IP 属于 Cloudflare (AS13335)，
+    // 且配置了 fallbackIp → 替换为自定义 IP（换 CF 共享 IP 绕过封 IP）
+    if (gcfg.fallbackIp && jr && jr.Answer) {
+      // 上游解析出的任一 A 记录 IP 属于 AS13335 → 替换为 fallbackIp
+      let upCF = false;
+      for (const a of jr.Answer) {
+        if (a.type === 1 && await isCloudflareIP(a.data, env)) { upCF = true; break; }
+      }
+      if (upCF) {
+        answers = buildAAnswer(qnameWire, qtype, [gcfg.fallbackIp], 300);
+      }
+    }
+  } else if (qtype === 65) {
+    // HTTPS 记录：手动规则（ech=true）或 域名是 CF 托管（A 记录属 AS13335）→ 注入 ECH
+    let injectECH = false;
+    if (rule && rule.ech) {
+      injectECH = true;
+    } else {
+      // 未命中手动规则：查 A 记录判断是否 CF 托管（AS13335 反查）
+      const jrA = await upstreamJSON(qname, 1, env);
+      if (jrA && jrA.Answer) {
+        for (const a of jrA.Answer) {
+          if (a.type === 1 && await isCloudflareIP(a.data, env)) { injectECH = true; break; }
+        }
+      }
+    }
+    if (injectECH) {
+      const ech = await getECH(env);
+      if (ech) {
+        answers = buildHTTPSAnswer(qnameWire, ech, 300);
+      }
+    } else {
+      // 非 CF 域名：正常上游转发 HTTPS 记录
+      const jr = await upstreamJSON(qname, qtype, env);
+      if (jr && jr.Answer) {
+        answers = jsonToAnswers(qnameWire, qname, jr.Answer);
+      }
     }
   } else {
-    // 未命中 → 上游转发（JSON → wire）
+    // 其他类型 → 上游转发
     const jr = await upstreamJSON(qname, qtype, env);
     if (jr && jr.Answer) {
       answers = jsonToAnswers(qnameWire, qname, jr.Answer);

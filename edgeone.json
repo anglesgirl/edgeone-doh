@@ -14,6 +14,16 @@
     {
       "path": "admin",
       "function": "admin",
+      "method": ["GET", "POST", "DELETE", "PUT"]
+    },
+    {
+      "path": "admin/config",
+      "function": "admin",
+      "method": ["GET", "PUT"]
+    },
+    {
+      "path": "admin/api",
+      "function": "admin",
       "method": ["GET", "POST", "DELETE"]
     },
     {
