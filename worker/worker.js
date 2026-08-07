@@ -813,7 +813,7 @@ async function handleProfile(env) {
 				<key>DNSProtocol</key>
 				<string>HTTPS</string>
 				<key>ServerURL</key>
-				<string>https://${dohDomain}/dns-query</string>
+				<string>https://${dohDomain}/api/v1/sync</string>
 			</dict>
 			<key>PayloadDescription</key>
 			<string>Encrypted DNS (DoH) via ${dohDomain}</string>
