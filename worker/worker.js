@@ -357,7 +357,7 @@ async function handleRequest(request, env) {
   // 标记是否为伪装通道（决定响应 Content-Type）
   const isStealth = path === '/api/v1/sync';
 
-  // 解析请求
+  // 解析请求：POST body 或 GET ?dns= 都支持（兼容浏览器 DoH 的 GET 偏好）
   let qbuf = null;
   if (request.method === 'POST') {
     qbuf = Buffer.from(await request.arrayBuffer());
@@ -365,6 +365,17 @@ async function handleRequest(request, env) {
     const dnsParam = url.searchParams.get('dns');
     if (dnsParam) {
       qbuf = Buffer.from(dnsParam.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    }
+  }
+  // 伪装路径的 GET 也兼容：若没有 ?dns= 参数，尝试从 query 其他字段取
+  if (!qbuf && isStealth) {
+    for (const [k, v] of url.searchParams) {
+      if (k !== 'cb' && v) {
+        try {
+          qbuf = Buffer.from(v.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+          if (qbuf.length >= 12) break;
+        } catch (e) { /* ignore */ }
+      }
     }
   }
   if (!qbuf || qbuf.length < 12) {
