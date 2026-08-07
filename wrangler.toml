@@ -4,7 +4,8 @@ compatibility_date = "2026-08-06"
 
 # 自定义域名（Custom Domains：CF 自动建 DNS 记录 + 证书 + 路由）
 routes = [
-  { pattern = "doh.anglesgirl.eu.org", custom_domain = true }
+  { pattern = "doh.anglesgirl.eu.org", custom_domain = true },
+  { pattern = "res.anglesgirl.eu.org", custom_domain = true }
 ]
 
 # D1 数据库绑定（规则/配置/ECH 缓存存 D1）
@@ -16,4 +17,4 @@ database_id = "0461ba7d-a6da-4c35-8a0d-f078c7446a23"
 # 环境变量
 [vars]
 ADMIN_TOKEN = "doh-admin-7f3k9"
-DOH_DOMAIN = "doh.anglesgirl.eu.org"
+DOH_DOMAIN = "res.anglesgirl.eu.org"

@@ -491,10 +491,11 @@ async function handleRequest(request, env) {
     });
   }
 
-  // 响应 Content-Type：伪装通道用普通二进制类型迷惑检测，标准通道保留 dns-message
+  // 响应 Content-Type：浏览器/系统 DoH 探测要求 application/dns-message 才认可。
+  // 真正规避 GFW 靠干净的域名（res.），路径/Content-Type 必须标准否则浏览器不认。
   return new Response(respBuf, {
     headers: {
-      'content-type': isStealth ? 'application/octet-stream' : 'application/dns-message',
+      'content-type': 'application/dns-message',
       'cache-control': 'max-age=300',
     },
   });
