@@ -9,6 +9,28 @@ const UPSTREAMS = [
   'https://cloudflare-dns.com/dns-query', // CF 公共 DoH（未墙但慢）
   'https://dns.google/resolve',           // Google 公共 DoH（dns-query 也支持）
 ];
+
+// 「谷歌家族」域名：正常解析 + 永不替换 IP + 永不注入 ECH。
+// 移植自 Cloudflare Zero Trust 的「谷歌全部」override 规则（google.com/youtube.com
+// 等谷歌全家），这些域名在 CN 靠真实 IP + 普通 TLS 可达；Google 不支持我们的
+// CF ECH 配置，强注会导致连接失败（ERR_INVALID_ECH_CONFIG_LIST）。
+// 后缀匹配（子域自动覆盖），如 "google.com" 匹配 www.google.com、apis.google.com。
+const GOOGLE_DOMAINS = [
+  'google.com', 'google.com.hk', 'google.com.tw', 'google.com.sg', 'google.com.au',
+  'google.co.jp', 'google.co.kr', 'google.co.uk', 'google.de', 'google.fr',
+  'google.ca', 'google.ru', 'google.in', 'google.cn', 'googleusercontent.com',
+  'googleapis.com', 'googleapis.cn', 'gstatic.com', 'ytimg.com', 'youtube.com',
+  'youtu.be', 'yt.com', 'ggpht.com', 'googlevideo.com', 'google.net',
+  'gmail.com', 'goo.gl', 'blogger.com', 'blogspot.com', 'appspot.com',
+];
+
+function isGoogleDomain(qname) {
+  const n = qname.toLowerCase().replace(/\.$/, '');
+  for (const g of GOOGLE_DOMAINS) {
+    if (n === g || n.endsWith('.' + g)) return true;
+  }
+  return false;
+}
 const KV_ECH_TTL = 300; // 5 分钟
 
 // ---------- AS13335 (Cloudflare) 判断 ----------
@@ -408,7 +430,8 @@ async function handleRequest(request, env) {
     }
     // 全局配置：如果域名是 CF 托管（AS13335 或 CNAME 链指向 cloudflare），
     // 且配置了 fallbackIp → 替换为自定义 IP（换 CF 共享 IP 绕过封 IP）
-    if (gcfg.fallbackIp && jr && jr.Answer) {
+    // 谷歌家族排除：正常解析真实 IP，不替换。
+    if (gcfg.fallbackIp && jr && jr.Answer && !isGoogleDomain(qname)) {
       let isCF = false;
       // 判定 1：任一 A 记录 IP 属于 AS13335
       for (const a of jr.Answer) {
@@ -430,21 +453,24 @@ async function handleRequest(request, env) {
     }
   } else if (qtype === 65) {
     // HTTPS 记录：手动规则（ech=true）或 域名是 CF 托管（A 记录属 AS13335）→ 注入 ECH
+    // 谷歌家族排除：Google 不支持我们的 CF ECH，永远不强注入。
     let injectECH = false;
-    if (rule && rule.ech) {
-      injectECH = true;
-    } else {
-      // 未命中手动规则：查 A 记录判断是否 CF 托管（AS13335 反查 + CNAME 链）
-      const jrA = await upstreamJSON(qname, 1, env);
-      if (jrA && jrA.Answer) {
-        for (const a of jrA.Answer) {
-          if (a.type === 1 && await isCloudflareIP(a.data, env)) { injectECH = true; break; }
-        }
-        if (!injectECH) {
+    if (!isGoogleDomain(qname)) {
+      if (rule && rule.ech) {
+        injectECH = true;
+      } else {
+        // 未命中手动规则：查 A 记录判断是否 CF 托管（AS13335 反查 + CNAME 链）
+        const jrA = await upstreamJSON(qname, 1, env);
+        if (jrA && jrA.Answer) {
           for (const a of jrA.Answer) {
-            if (a.type === 5 && typeof a.data === 'string' &&
-                /(^|\.)cdn\.cloudflare\.net\.?$|(^|\.)cloudflare\.net\.?$|(^|\.)workers\.dev\.?$/i.test(a.data)) {
-              injectECH = true; break;
+            if (a.type === 1 && await isCloudflareIP(a.data, env)) { injectECH = true; break; }
+          }
+          if (!injectECH) {
+            for (const a of jrA.Answer) {
+              if (a.type === 5 && typeof a.data === 'string' &&
+                  /(^|\.)cdn\.cloudflare\.net\.?$|(^|\.)cloudflare\.net\.?$|(^|\.)workers\.dev\.?$/i.test(a.data)) {
+                injectECH = true; break;
+              }
             }
           }
         }
