@@ -379,7 +379,14 @@ async function handleRequest(request, env) {
     }
   }
   if (!qbuf || qbuf.length < 12) {
-    return new Response('missing dns query', { status: 400 });
+    // 空查询（浏览器探测 endpoint 有效性时）→ 返回合法空应答，而非 400。
+    // 浏览器 DoH 探测（如 use-application-dns.net）得不到合法响应会判定 endpoint 无效。
+    const hdr = Buffer.alloc(12);
+    try { hdr.writeUInt16BE(qbuf ? qbuf.readUInt16BE(0) : 0x1234, 0); } catch (e) { hdr.writeUInt16BE(0x1234, 0); }
+    hdr.writeUInt16BE(0x8180, 2); // QR + RD + RA, RCODE=0, 0 answers
+    return new Response(hdr, {
+      headers: { 'content-type': 'application/dns-message', 'cache-control': 'max-age=300' },
+    });
   }
 
   // 解析 question
