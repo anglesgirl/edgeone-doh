@@ -806,6 +806,23 @@ label{display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8;margi
 <h2>📋 规则列表</h2>
 <table><thead><tr><th>域名</th><th>自定义 IP</th><th>ECH</th><th></th></tr></thead><tbody id="rules"></tbody></table>
 
+<h2>📦 覆写集合（Override 组）</h2>
+<div class="card">
+  <div class="tip">把一组域名整体覆写到指定 IP（如「谷歌全家桶」→ 阿里云 IP）。集合内域名（含子域）解析到覆写 IP；IP 失效换一个即可，不用改代码。多个域名空格分隔，多个 IP 空格或逗号分隔。</div>
+  <div class="row">
+    <input id="ovName" placeholder="集合名，如：谷歌全家桶" style="flex:1">
+    <input id="ovIps" placeholder="覆写 IP（如 47.103.34.63 121.43.186.252）" style="flex:2">
+  </div>
+  <input id="ovDomains" placeholder="域名列表（空格分隔，如 google.com youtube.com ytimg.com .google）" style="width:100%;margin-top:8px">
+  <label><input type="checkbox" id="ovEch" style="width:auto"> 注入 ECH（Google 类不需要）</label>
+  <button onclick="saveOverride()">保存覆写集合</button>
+  <div id="ovStatus"></div>
+</div>
+<div class="card">
+  <h3 style="margin:0 0 8px">已有覆写集合</h3>
+  <div id="ovList"></div>
+</div>
+
 <h2>📱 iOS 用户</h2>
 <div class="card">
   Safari 打开 <span class="code" id="profileUrl">…</span> 安装描述文件，系统 DNS 全部走本 DoH（防污染 + 自定义 IP + ECH）。
@@ -858,7 +875,45 @@ async function refresh() {
   if (g && g.fallbackIp) document.getElementById('fbIp').value = g.fallbackIp;
   if (g && g.ech !== undefined) document.getElementById('gbEch').checked = g.ech;
   document.getElementById('profileUrl').textContent = location.origin + '/profile.mobileconfig';
+  loadOverrides();
 }
+async function saveOverride() {
+  const name = document.getElementById('ovName').value.trim();
+  const doms = document.getElementById('ovDomains').value.trim().split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+  const ips = document.getElementById('ovIps').value.trim().split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+  const ech = document.getElementById('ovEch').checked;
+  const d = await api('/admin/override', {method:'POST', body: JSON.stringify({name, domains: doms, ips, ech})});
+  document.getElementById('ovStatus').textContent = d && d.ok ? '✅ 已保存 ' + name : (d && d.error ? '❌ ' + d.error : '失败');
+  if (d && d.ok) { document.getElementById('ovName').value=''; document.getElementById('ovIps').value=''; document.getElementById('ovDomains').value=''; }
+  loadOverrides();
+}
+async function loadOverrides() {
+  const d = await api('/admin/override');
+  if (!d) return;
+  const box = document.getElementById('ovList');
+  if (!d.overrides || d.overrides.length === 0) { box.textContent = '（暂无覆写集合）'; return; }
+  const rows = d.overrides.map(o => {
+    const ips = o.ips.join(' ');
+    return '<div style="padding:8px;border:1px solid #1e293b;border-radius:8px;margin-bottom:8px">' +
+      '<strong>'+o.name+'</strong>' +
+      '<div class="tip">IP: <span class="code">'+ips+'</span> · ECH: '+(o.ech?'✅':'—')+'</div>' +
+      '<div class="tip">域名: '+o.domains.join(', ')+'</div>' +
+      '<button class="delovbtn" data-n="'+encodeURIComponent(o.name)+'" style="margin-top:6px">删除</button>' +
+      '</div>';
+  }).join('');
+  box.innerHTML = rows;
+  box.onclick = (e) => {
+    const btn = e.target.closest('.delovbtn');
+    if (btn) delOverride(decodeURIComponent(btn.dataset.n));
+  };
+}
+async function delOverride(name) {
+  await api('/admin/override?name='+encodeURIComponent(name), {method:'DELETE'});
+  loadOverrides();
+}
+window.saveOverride = saveOverride;
+window.loadOverrides = loadOverrides;
+window.delOverride = delOverride;
 async function addRule() {
   const body = {domain: document.getElementById('domain').value.trim(),
     ips: document.getElementById('ips').value.split(',').map(s=>s.trim()).filter(Boolean),
