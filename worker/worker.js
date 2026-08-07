@@ -31,6 +31,10 @@ function isGoogleDomain(qname) {
   }
   return false;
 }
+
+// 谷歌家族覆写 IP：阿里云专门为 Google 做的国内加速节点（AS37963，国内可达）。
+// 从 CF 网关「谷歌全部」override 规则搬运（网关当前返回 47.103.34.63）。
+const GOOGLE_OVERRIDE_IPS = ['47.103.34.63', '121.43.186.252'];
 const KV_ECH_TTL = 300; // 5 分钟
 
 // ---------- AS13335 (Cloudflare) 判断 ----------
@@ -423,6 +427,24 @@ async function handleRequest(request, env) {
     // 手动规则命中 A 记录：返回自定义 IP
     answers = buildAAnswer(qnameWire, qtype, rule.ips, 300);
   } else if (qtype === 1) {
+    // 谷歌家族：默认覆写到国内可达的阿里云 Google 加速节点（不注 ECH）。
+    // 例外：若上游返回 CNAME 指向"非 Google 家族"域名（如走了第三方 CDN），
+    // 不覆写——否则该域名实际由第三方 CDN 服务，覆写到阿里云节点会异常。
+    let googleOverride = isGoogleDomain(qname);
+    if (googleOverride) {
+      const jrC = await upstreamJSON(qname, qtype, env);
+      if (jrC && jrC.Answer) {
+        for (const a of jrC.Answer) {
+          if (a.type === 5 && typeof a.data === 'string') {
+            const target = a.data.replace(/\.$/, '').toLowerCase();
+            if (!isGoogleDomain(target)) { googleOverride = false; break; }
+          }
+        }
+      }
+    }
+    if (googleOverride) {
+      answers = buildAAnswer(qnameWire, qtype, GOOGLE_OVERRIDE_IPS, 300);
+    } else {
     // 未命中手动规则 → 上游解析，然后检查是否 AS13335
     const jr = await upstreamJSON(qname, qtype, env);
     if (jr && jr.Answer) {
@@ -430,7 +452,7 @@ async function handleRequest(request, env) {
     }
     // 全局配置：如果域名是 CF 托管（AS13335 或 CNAME 链指向 cloudflare），
     // 且配置了 fallbackIp → 替换为自定义 IP（换 CF 共享 IP 绕过封 IP）
-    // 谷歌家族排除：正常解析真实 IP，不替换。
+    // 谷歌家族排除：覆写到阿里云节点，不替换。
     if (gcfg.fallbackIp && jr && jr.Answer && !isGoogleDomain(qname)) {
       let isCF = false;
       // 判定 1：任一 A 记录 IP 属于 AS13335
@@ -450,6 +472,7 @@ async function handleRequest(request, env) {
       if (isCF) {
         answers = buildAAnswer(qnameWire, qtype, [gcfg.fallbackIp], 300);
       }
+    }
     }
   } else if (qtype === 65) {
     // HTTPS 记录：手动规则（ech=true）或 域名是 CF 托管（A 记录属 AS13335）→ 注入 ECH
