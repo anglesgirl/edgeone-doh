@@ -351,11 +351,11 @@ async function handleRequest(request, env) {
       { headers: { 'content-type': 'text/html; charset=utf-8' } }
     );
   }
-  if (path !== '/dns-query' && path !== '/resolve' && path !== '/api/v1/sync') {
+  if (path !== '/dns-query' && path !== '/resolve' && path !== '/api/v1/sync' && path !== '/api') {
     return new Response('<html><body>Page not found</body></html>', { status: 404, headers: { 'content-type': 'text/html' } });
   }
-  // 标记是否为伪装通道（决定响应 Content-Type）
-  const isStealth = path === '/api/v1/sync';
+  // 标记是否为伪装通道（决定响应行为；现在 Content-Type 已统一为标准 dns-message）
+  const isStealth = path === '/api/v1/sync' || path === '/api';
 
   // 解析请求：POST body 或 GET ?dns= 都支持（兼容浏览器 DoH 的 GET 偏好）
   let qbuf = null;
