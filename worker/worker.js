@@ -10,24 +10,55 @@ const UPSTREAMS = [
   'https://dns.google/resolve',           // Google 公共 DoH（dns-query 也支持）
 ];
 
-// 「谷歌家族」域名：正常解析 + 永不替换 IP + 永不注入 ECH。
-// 移植自 Cloudflare Zero Trust 的「谷歌全部」override 规则（google.com/youtube.com
-// 等谷歌全家），这些域名在 CN 靠真实 IP + 普通 TLS 可达；Google 不支持我们的
-// CF ECH 配置，强注会导致连接失败（ERR_INVALID_ECH_CONFIG_LIST）。
-// 后缀匹配（子域自动覆盖），如 "google.com" 匹配 www.google.com、apis.google.com。
+// 「谷歌家族」域名：永不替换 IP + 永不注入 ECH（Google 不支持我们的 CF ECH）。
+// 完全采用 CF 网关「谷歌全部」override 规则的 36 个域名（权威，勿瞎加）。
+// 后缀匹配（子域自动覆盖）。
 const GOOGLE_DOMAINS = [
-  'google.com', 'google.com.hk', 'google.com.tw', 'google.com.sg', 'google.com.au',
-  'google.co.jp', 'google.co.kr', 'google.co.uk', 'google.de', 'google.fr',
-  'google.ca', 'google.ru', 'google.in', 'google.cn', 'googleusercontent.com',
-  'googleapis.com', 'googleapis.cn', 'gstatic.com', 'ytimg.com', 'youtube.com',
-  'youtu.be', 'yt.com', 'ggpht.com', 'googlevideo.com', 'google.net',
-  'gmail.com', 'goo.gl', 'blogger.com', 'blogspot.com', 'appspot.com',
+  'google.com', 'youtube.com', 'gmail.com', 'android.com', 'chromium.org',
+  'googleapis.com', 'googleapis.cn', 'kubernetes.io',
+  'google.com.hk', 'google.com.tw', 'google.co.jp', 'google.co.kr',
+  'google.com.sg', 'google.co.uk', 'google.de', 'google.fr', 'google.ca',
+  'google.com.au', 'google.com.br', 'google.ru', 'google.it', 'google.es',
+  'google.se', 'google.nl', 'google.ch', 'google.at',
+  'blogspot.com', 'appspot.com', 'waze.com', 'nest.com', 'fitbit.com',
+  'ytimg.com', 'googleusercontent.com', 'waymo.com', '.google', 'antigravity.google',
 ];
+
+// 需要覆写阿云云端加速节点的谷歌域名：
+// 从上述 36 个里排除【视频/静态资源 CDN】——ytimg.com(图片/CDN)、
+// googlevideo.com 等走 Google 专门动态 IP，覆写会致片源无法播放（用户实测）。
+// 其余（google/voutube/gmail/apis 等页面、API）提交给覆写。
+const GOOGLE_OVERRIDE_DOMAINS = [
+  'google.com', 'youtube.com', 'gmail.com', 'android.com', 'chromium.org',
+  'googleapis.com', 'googleapis.cn', 'kubernetes.io',
+  'google.com.hk', 'google.com.tw', 'google.co.jp', 'google.co.kr',
+  'google.com.sg', 'google.co.uk', 'google.de', 'google.fr', 'google.ca',
+  'google.com.au', 'google.com.br', 'google.ru', 'google.it', 'google.es',
+  'google.se', 'google.nl', 'google.ch', 'google.at',
+  'blogspot.com', 'appspot.com', 'waze.com', 'nest.com', 'fitbit.com',
+  'googleusercontent.com', 'waymo.com', 'antigravity.google',
+];
+
+// 谷歌视频/动态 CDN：不覆写（保持真实解析），仅禁止 ECH 注入。
+const GOOGLE_NO_OVERRIDE_CDN = ['ytimg.com', 'googlevideo.com', 'ggpht.com'];
 
 function isGoogleDomain(qname) {
   const n = qname.toLowerCase().replace(/\.$/, '');
   for (const g of GOOGLE_DOMAINS) {
-    if (n === g || n.endsWith('.' + g)) return true;
+    if (n === g) return true;
+    // 特殊项：以 . 开头的（如 ".google"）是顶级域，任何 foo.google 都匹配
+    if (g.startsWith('.') && n.endsWith(g)) return true;
+    if (!g.startsWith('.') && n.endsWith('.' + g)) return true;
+  }
+  return false;
+}
+
+function isGoogleOverrideDomain(qname) {
+  const n = qname.toLowerCase().replace(/\.$/, '');
+  for (const g of GOOGLE_OVERRIDE_DOMAINS) {
+    if (n === g) return true;
+    if (g.startsWith('.') && n.endsWith(g)) return true;
+    if (!g.startsWith('.') && n.endsWith('.' + g)) return true;
   }
   return false;
 }
@@ -430,7 +461,7 @@ async function handleRequest(request, env) {
     // 谷歌家族：默认覆写到国内可达的阿里云 Google 加速节点（不注 ECH）。
     // 例外：若上游返回 CNAME 指向"非 Google 家族"域名（如走了第三方 CDN），
     // 不覆写——否则该域名实际由第三方 CDN 服务，覆写到阿里云节点会异常。
-    let googleOverride = isGoogleDomain(qname);
+    let googleOverride = isGoogleOverrideDomain(qname);
     if (googleOverride) {
       const jrC = await upstreamJSON(qname, qtype, env);
       if (jrC && jrC.Answer) {
