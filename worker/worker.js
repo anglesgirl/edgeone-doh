@@ -10,58 +10,6 @@ const UPSTREAMS = [
   'https://dns.google/resolve',           // Google 公共 DoH（dns-query 也支持）
 ];
 
-// 「谷歌家族」域名：永不替换 IP + 永不注入 ECH（Google 不支持我们的 CF ECH）。
-// 完全采用 CF 网关「谷歌全部」override 规则的 36 个域名（权威，勿瞎加）。
-// 后缀匹配（子域自动覆盖）。
-const GOOGLE_DOMAINS = [
-  'google.com', 'youtube.com', 'gmail.com', 'android.com', 'chromium.org',
-  'googleapis.com', 'googleapis.cn', 'kubernetes.io',
-  'google.com.hk', 'google.com.tw', 'google.co.jp', 'google.co.kr',
-  'google.com.sg', 'google.co.uk', 'google.de', 'google.fr', 'google.ca',
-  'google.com.au', 'google.com.br', 'google.ru', 'google.it', 'google.es',
-  'google.se', 'google.nl', 'google.ch', 'google.at',
-  'blogspot.com', 'appspot.com', 'waze.com', 'nest.com', 'fitbit.com',
-  'ytimg.com', 'googleusercontent.com', 'waymo.com', '.google', 'antigravity.google',
-];
-
-// 覆写名单（权威）：完全等同 CF 网关「谷歌全部」规则的 36 个域名。
-// 名单内 → 覆写到阿里云 IP（GOOGLE_OVERRIDE_IPS）；含所有子域（后缀匹配）。
-// 名单外 → 走真实上游解析。
-const GOOGLE_OVERRIDE_DOMAINS = [
-  'google.com', 'youtube.com', 'gmail.com', 'android.com', 'chromium.org',
-  'googleapis.com', 'googleapis.cn', 'kubernetes.io',
-  'google.com.hk', 'google.com.tw', 'google.co.jp', 'google.co.kr',
-  'google.com.sg', 'google.co.uk', 'google.de', 'google.fr', 'google.ca',
-  'google.com.au', 'google.com.br', 'google.ru', 'google.it', 'google.es',
-  'google.se', 'google.nl', 'google.ch', 'google.at',
-  'blogspot.com', 'appspot.com', 'waze.com', 'nest.com', 'fitbit.com',
-  'ytimg.com', 'googleusercontent.com', 'waymo.com', '.google', 'antigravity.google',
-];
-
-function isGoogleDomain(qname) {
-  const n = qname.toLowerCase().replace(/\.$/, '');
-  for (const g of GOOGLE_DOMAINS) {
-    if (n === g) return true;
-    // 特殊项：以 . 开头的（如 ".google"）是顶级域，任何 foo.google 都匹配
-    if (g.startsWith('.') && n.endsWith(g)) return true;
-    if (!g.startsWith('.') && n.endsWith('.' + g)) return true;
-  }
-  return false;
-}
-
-function isGoogleOverrideDomain(qname) {
-  const n = qname.toLowerCase().replace(/\.$/, '');
-  for (const g of GOOGLE_OVERRIDE_DOMAINS) {
-    if (n === g) return true;
-    if (g.startsWith('.') && n.endsWith(g)) return true;
-    if (!g.startsWith('.') && n.endsWith('.' + g)) return true;
-  }
-  return false;
-}
-
-// 谷歌家族覆写 IP：阿里云专门为 Google 做的国内加速节点（AS37963，国内可达）。
-// 从 CF 网关「谷歌全部」override 规则搬运（网关当前返回 47.103.34.63）。
-const GOOGLE_OVERRIDE_IPS = ['47.103.34.63', '121.43.186.252'];
 const KV_ECH_TTL = 300; // 5 分钟
 
 // ---------- AS13335 (Cloudflare) 判断 ----------
@@ -486,20 +434,14 @@ async function handleRequest(request, env) {
     // 手动规则命中 A 记录：返回自定义 IP
     answers = buildAAnswer(qnameWire, qtype, rule.ips, 300);
   } else if (qtype === 1) {
-    // 覆写名单（网关「谷歌全部」）：名单内域名（含子域）→ 覆写到阿里云 IP。
-    // 名单外的 → 走上游正常解析（GFW 下用真实 IP）。
-    if (isGoogleOverrideDomain(qname)) {
-      // 名单内：覆写阿里云节点
-      answers = buildAAnswer(qnameWire, qtype, GOOGLE_OVERRIDE_IPS, 300);
-    } else {
-    // 未命中手动规则 → 上游解析，然后检查是否 AS13335
+    // 未命中 override / 手动规则 → 上游解析，然后检查是否 AS13335
     const jr = await upstreamJSON(qname, qtype, env);
     if (jr && jr.Answer) {
       answers = jsonToAnswers(qnameWire, qname, jr.Answer);
     }
     // 全局配置：如果域名是 CF 托管（AS13335 或 CNAME 链指向 cloudflare），
     // 且配置了 fallbackIp → 替换为自定义 IP（换 CF 共享 IP 绕过封 IP）
-    if (gcfg.fallbackIp && jr && jr.Answer && !isGoogleDomain(qname)) {
+    if (gcfg.fallbackIp && jr && jr.Answer && !override) {
       let isCF = false;
       // 判定 1：任一 A 记录 IP 属于 AS13335
       for (const a of jr.Answer) {
@@ -518,7 +460,6 @@ async function handleRequest(request, env) {
       if (isCF) {
         answers = buildAAnswer(qnameWire, qtype, [gcfg.fallbackIp], 300);
       }
-    }
     }
   } else if (qtype === 65) {
     // HTTPS 记录：覆写集合（ech 按集合设置）/ 手动规则（ech=true）或 CF 托管 → 注入 ECH
