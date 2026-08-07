@@ -346,6 +346,34 @@ async function getRule(env, domain) {
   return null;
 }
 
+// 查覆写集合（override 组）：遍历 overrides 表，若 qname 后缀匹配某集合的某个域名，
+// 返回该集合的覆写 IP + ech 标志。如「谷歌全家桶」domains=[google.com,...] 命中含子域。
+async function getOverrideMatch(env, qname) {
+  const n = qname.toLowerCase().replace(/\.$/, '');
+  try {
+    const { results } = await env.DB.prepare('SELECT name, domains, ips, ech FROM overrides').all();
+    for (const row of (results || [])) {
+      let doms = [];
+      try { doms = JSON.parse(row.domains); } catch (e) {}
+      for (const g of (doms || [])) {
+        const gd = String(g).toLowerCase().replace(/\.$/, '');
+        if (!gd) continue;
+        // 匹配：域相等，或 x 是 gd 的子域，或 ".后缀" 顶级匹配
+        const match =
+          n === gd ||
+          (gd.startsWith('.') && n.endsWith(gd)) ||
+          (!gd.startsWith('.') && n.endsWith('.' + gd));
+        if (match) {
+          let ips = [];
+          try { ips = JSON.parse(row.ips); } catch (e) {}
+          return { name: row.name, ips, ech: !!row.ech };
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
 // ---------- 主处理 ----------
 
 export default {
@@ -447,10 +475,14 @@ async function handleRequest(request, env) {
 
   // 规则命中？
   const rule = await getRule(env, qname.toLowerCase());
+  const override = await getOverrideMatch(env, qname.toLowerCase());
   const gcfg = await getGlobalConfig(env);
   let answers = [];
 
-  if (rule && rule.ips && rule.ips.length > 0 && qtype === 1) {
+  if (override && override.ips && override.ips.length > 0 && qtype === 1) {
+    // 覆写集合命中（如「谷歌全家桶」）：返回覆写 IP；ech 按集合设置
+    answers = buildAAnswer(qnameWire, qtype, override.ips, 300);
+  } else if (rule && rule.ips && rule.ips.length > 0 && qtype === 1) {
     // 手动规则命中 A 记录：返回自定义 IP
     answers = buildAAnswer(qnameWire, qtype, rule.ips, 300);
   } else if (qtype === 1) {
@@ -489,10 +521,15 @@ async function handleRequest(request, env) {
     }
     }
   } else if (qtype === 65) {
-    // HTTPS 记录：手动规则（ech=true）或 域名是 CF 托管（A 记录属 AS13335）→ 注入 ECH
-    // 谷歌家族排除：Google 不支持我们的 CF ECH，永远不强注入。
+    // HTTPS 记录：覆写集合（ech 按集合设置）/ 手动规则（ech=true）或 CF 托管 → 注入 ECH
     let injectECH = false;
-    if (!isGoogleDomain(qname)) {
+    if (override && override.ech) {
+      // 覆写集合明确要求注 ECH（如某些站）
+      injectECH = true;
+    } else if (override && !override.ech) {
+      // 覆写集合适用（如谷歌全家桶，ech=false）→ 不强注
+      injectECH = false;
+    } else if (!override) {
       if (rule && rule.ech) {
         injectECH = true;
       } else {
@@ -644,6 +681,50 @@ async function delRule(env, domain) {
   if (domain.startsWith('.')) domain = domain.slice(1);
   try {
     await env.DB.prepare('DELETE FROM rules WHERE domain = ?').bind(domain).run();
+  } catch (e) { /* ignore */ }
+  return { ok: true };
+}
+
+// ---------- 覆写集合（override 组）管理 ----------
+
+async function listOverrides(env) {
+  try {
+    const { results } = await env.DB.prepare('SELECT name, domains, ips, ech FROM overrides ORDER BY name').all();
+    return (results || []).map(r => ({
+      name: r.name,
+      domains: JSON.parse(r.domains || '[]'),
+      ips: JSON.parse(r.ips || '[]'),
+      ech: !!r.ech,
+    }));
+  } catch (e) { return []; }
+}
+
+async function upsertOverride(env, name, domains, ips, ech) {
+  name = (name || '').trim();
+  if (!name) return { ok: false, error: 'name empty' };
+  const doms = (domains || []).map(d => String(d).trim().toLowerCase().replace(/\.$/, '')).filter(Boolean);
+  if (doms.length === 0) return { ok: false, error: 'domains empty' };
+  const ipList = (ips || []).map(ip => String(ip).trim()).filter(Boolean);
+  if (ipList.length === 0) return { ok: false, error: 'ips empty' };
+  // IP 校验
+  for (const ip of ipList) {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
+      return { ok: false, error: `invalid IP: ${ip}` };
+    }
+  }
+  try {
+    await env.DB.prepare(
+      'INSERT INTO overrides (name, domains, ips, ech) VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET domains = excluded.domains, ips = excluded.ips, ech = excluded.ech'
+    ).bind(name, JSON.stringify(doms), JSON.stringify(ipList), ech ? 1 : 0).run();
+  } catch (e) { return { ok: false, error: String(e) }; }
+  return { ok: true };
+}
+
+async function delOverride(env, name) {
+  name = (name || '').trim();
+  try {
+    await env.DB.prepare('DELETE FROM overrides WHERE name = ?').bind(name).run();
   } catch (e) { /* ignore */ }
   return { ok: true };
 }
@@ -829,6 +910,28 @@ async function handleAdmin(request, env, url) {
       const body = await request.json();
       const g = await setGlobal(env, body);
       return new Response(JSON.stringify({ ok: true, ...g }), {
+        headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
+  }
+  if (path === '/admin/override') {
+    if (request.method === 'GET') {
+      const ovs = await listOverrides(env);
+      return new Response(JSON.stringify({ ok: true, overrides: ovs }), {
+        headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
+    if (request.method === 'POST') {
+      const body = await request.json();
+      const r = await upsertOverride(env, body.name || '', body.domains || [], body.ips || [], body.ech);
+      return new Response(JSON.stringify(r), {
+        headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
+    if (request.method === 'DELETE') {
+      const name = url.searchParams.get('name') || '';
+      const r = await delOverride(env, name);
+      return new Response(JSON.stringify(r), {
         headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
       });
     }
