@@ -839,14 +839,30 @@ async function loadOverrides() {
       '<strong>'+o.name+'</strong>' +
       '<div class="tip">IP: <span class="code">'+ips+'</span> · ECH: '+(o.ech?'✅':'—')+'</div>' +
       '<div class="tip">域名: '+o.domains.join(', ')+'</div>' +
-      '<button class="delovbtn" data-n="'+encodeURIComponent(o.name)+'" style="margin-top:6px">删除</button>' +
+      '<button class="editovbtn" data-n="'+encodeURIComponent(o.name)+'">✏️ 编辑</button> ' +
+      '<button class="delovbtn" data-n="'+encodeURIComponent(o.name)+'">删除</button>' +
       '</div>';
   }).join('');
   box.innerHTML = rows;
   box.onclick = (e) => {
-    const btn = e.target.closest('.delovbtn');
-    if (btn) delOverride(decodeURIComponent(btn.dataset.n));
+    const delbtn = e.target.closest('.delovbtn');
+    if (delbtn) { delOverride(decodeURIComponent(delbtn.dataset.n)); return; }
+    const edbtn = e.target.closest('.editovbtn');
+    if (edbtn) editOverride(decodeURIComponent(edbtn.dataset.n));
   };
+}
+async function editOverride(name) {
+  const list = await api('/admin/override');
+  if (!list || !list.overrides) return;
+  const o = list.overrides.find(x => x.name === name);
+  if (!o) return;
+  document.getElementById('ovName').value = o.name;
+  document.getElementById('ovDomains').value = o.domains.join(' ');
+  document.getElementById('ovIps').value = o.ips.join(' ');
+  document.getElementById('ovEch').checked = !!o.ech;
+  const st = document.getElementById('ovStatus');
+  st.textContent = '✏️ 正在编辑「' + o.name + '」：改好 IP 后点"保存覆写集合"即更新（同名覆盖，立即生效）。';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 async function delOverride(name) {
   await api('/admin/override?name='+encodeURIComponent(name), {method:'DELETE'});
@@ -855,6 +871,7 @@ async function delOverride(name) {
 window.saveOverride = saveOverride;
 window.loadOverrides = loadOverrides;
 window.delOverride = delOverride;
+window.editOverride = editOverride;
 async function addRule() {
   const body = {domain: document.getElementById('domain').value.trim(),
     ips: document.getElementById('ips').value.split(',').map(s=>s.trim()).filter(Boolean),
