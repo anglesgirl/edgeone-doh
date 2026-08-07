@@ -334,9 +334,28 @@ async function handleRequest(request, env) {
     return handleProfile(env);
   }
   // ---- DoH ----
-  if (path !== '/dns-query' && path !== '/resolve' && path !== '/') {
-    return new Response('ECH DoH on EdgeOne. Use /dns-query', { status: 404 });
+  // 伪装策略：
+  //  - /          → 普通 HTML 页面（伪装成网站首页，隐藏 DoH 身份）
+  //  - /api/v1/sync → 伪装 POST 接口（App 通道，body 承载 DNS 包）
+  //  - /dns-query  → 标准 DoH（iOS 描述文件必需，保留）
+  if (path === '/' || path === '/index.html') {
+    return new Response(
+      '<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>Angles 网络服务</title></head><body>' +
+      '<div style="font-family:sans-serif;max-width:600px;margin:80px auto;text-align:center;color:#555">' +
+      '<h1>💚 Angles Network</h1>' +
+      '<p>Network infrastructure service. Status: operational.</p>' +
+      '<p style="font-size:12px;color:#aaa">© 2026 — All systems normal</p>' +
+      '</div></body></html>',
+      { headers: { 'content-type': 'text/html; charset=utf-8' } }
+    );
   }
+  if (path !== '/dns-query' && path !== '/resolve' && path !== '/api/v1/sync') {
+    return new Response('<html><body>Page not found</body></html>', { status: 404, headers: { 'content-type': 'text/html' } });
+  }
+  // 标记是否为伪装通道（决定响应 Content-Type）
+  const isStealth = path === '/api/v1/sync';
 
   // 解析请求
   let qbuf = null;
@@ -461,10 +480,10 @@ async function handleRequest(request, env) {
     });
   }
 
-  // Workers 原生 Buffer 即 Uint8Array，可直接作为 Response body
+  // 响应 Content-Type：伪装通道用普通二进制类型迷惑检测，标准通道保留 dns-message
   return new Response(respBuf, {
     headers: {
-      'content-type': 'application/dns-message',
+      'content-type': isStealth ? 'application/octet-stream' : 'application/dns-message',
       'cache-control': 'max-age=300',
     },
   });
