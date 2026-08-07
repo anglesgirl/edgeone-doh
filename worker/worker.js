@@ -24,10 +24,9 @@ const GOOGLE_DOMAINS = [
   'ytimg.com', 'googleusercontent.com', 'waymo.com', '.google', 'antigravity.google',
 ];
 
-// 需要覆写阿云云端加速节点的谷歌域名：
-// 从上述 36 个里排除【视频/静态资源 CDN】——ytimg.com(图片/CDN)、
-// googlevideo.com 等走 Google 专门动态 IP，覆写会致片源无法播放（用户实测）。
-// 其余（google/voutube/gmail/apis 等页面、API）提交给覆写。
+// 覆写名单（权威）：完全等同 CF 网关「谷歌全部」规则的 36 个域名。
+// 名单内 → 覆写到阿里云 IP（GOOGLE_OVERRIDE_IPS）；含所有子域（后缀匹配）。
+// 名单外 → 走真实上游解析。
 const GOOGLE_OVERRIDE_DOMAINS = [
   'google.com', 'youtube.com', 'gmail.com', 'android.com', 'chromium.org',
   'googleapis.com', 'googleapis.cn', 'kubernetes.io',
@@ -36,11 +35,8 @@ const GOOGLE_OVERRIDE_DOMAINS = [
   'google.com.au', 'google.com.br', 'google.ru', 'google.it', 'google.es',
   'google.se', 'google.nl', 'google.ch', 'google.at',
   'blogspot.com', 'appspot.com', 'waze.com', 'nest.com', 'fitbit.com',
-  'googleusercontent.com', 'waymo.com', 'antigravity.google',
+  'ytimg.com', 'googleusercontent.com', 'waymo.com', '.google', 'antigravity.google',
 ];
-
-// 谷歌视频/动态 CDN：不覆写（保持真实解析），仅禁止 ECH 注入。
-const GOOGLE_NO_OVERRIDE_CDN = ['ytimg.com', 'googlevideo.com', 'ggpht.com'];
 
 function isGoogleDomain(qname) {
   const n = qname.toLowerCase().replace(/\.$/, '');
@@ -458,22 +454,10 @@ async function handleRequest(request, env) {
     // 手动规则命中 A 记录：返回自定义 IP
     answers = buildAAnswer(qnameWire, qtype, rule.ips, 300);
   } else if (qtype === 1) {
-    // 谷歌家族：默认覆写到国内可达的阿里云 Google 加速节点（不注 ECH）。
-    // 例外：若上游返回 CNAME 指向"非 Google 家族"域名（如走了第三方 CDN），
-    // 不覆写——否则该域名实际由第三方 CDN 服务，覆写到阿里云节点会异常。
-    let googleOverride = isGoogleOverrideDomain(qname);
-    if (googleOverride) {
-      const jrC = await upstreamJSON(qname, qtype, env);
-      if (jrC && jrC.Answer) {
-        for (const a of jrC.Answer) {
-          if (a.type === 5 && typeof a.data === 'string') {
-            const target = a.data.replace(/\.$/, '').toLowerCase();
-            if (!isGoogleDomain(target)) { googleOverride = false; break; }
-          }
-        }
-      }
-    }
-    if (googleOverride) {
+    // 覆写名单（网关「谷歌全部」）：名单内域名（含子域）→ 覆写到阿里云 IP。
+    // 名单外的 → 走上游正常解析（GFW 下用真实 IP）。
+    if (isGoogleOverrideDomain(qname)) {
+      // 名单内：覆写阿里云节点
       answers = buildAAnswer(qnameWire, qtype, GOOGLE_OVERRIDE_IPS, 300);
     } else {
     // 未命中手动规则 → 上游解析，然后检查是否 AS13335
@@ -483,7 +467,6 @@ async function handleRequest(request, env) {
     }
     // 全局配置：如果域名是 CF 托管（AS13335 或 CNAME 链指向 cloudflare），
     // 且配置了 fallbackIp → 替换为自定义 IP（换 CF 共享 IP 绕过封 IP）
-    // 谷歌家族排除：覆写到阿里云节点，不替换。
     if (gcfg.fallbackIp && jr && jr.Answer && !isGoogleDomain(qname)) {
       let isCF = false;
       // 判定 1：任一 A 记录 IP 属于 AS13335
