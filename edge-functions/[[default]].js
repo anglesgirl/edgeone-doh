@@ -1,6 +1,73 @@
 // EdgeOne Pages Functions — DoH 服务器（免服务器版）
 // 路由：/dns-query（标准 DoH wire format）+ /resolve（JSON 调试）
-// 规则存 KV（key: rule:<domain> → JSON {ips:[],ech:true}）
+// ==================== Buffer polyfill（EdgeOne 无 Node Buffer 全局，2026-08-17）====================
+class Buffer {
+  constructor(arr) { this.data = new Uint8Array(arr); }
+  static alloc(n) { return new Buffer(new Uint8Array(n)); }
+  static from(x, enc) {
+    if (typeof x === 'string') {
+      if (enc === 'base64') {
+        const bin = atob(x);
+        const u = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+        return new Buffer(u);
+      }
+      if (enc === 'hex') {
+        const clean = x.replace(/\s+/g, '');
+        const u = new Uint8Array(clean.length / 2);
+        for (let i = 0; i < u.length; i++) u[i] = parseInt(clean.substr(i * 2, 2), 16);
+        return new Buffer(u);
+      }
+      const u = new Uint8Array(x.length);
+      for (let i = 0; i < x.length; i++) u[i] = x.charCodeAt(i) & 0xff;
+      return new Buffer(u);
+    }
+    if (x instanceof Uint8Array) return new Buffer(x);
+    if (x instanceof ArrayBuffer) return new Buffer(new Uint8Array(x));
+    if (Array.isArray(x)) return new Buffer(new Uint8Array(x));
+    if (x instanceof Buffer) return new Buffer(x.data);
+    throw new Error('Buffer.from unsupported: ' + typeof x);
+  }
+  static concat(list) {
+    let total = 0;
+    for (const b of list) total += b.length;
+    const u = new Uint8Array(total);
+    let off = 0;
+    for (const b of list) { u.set(b.data, off); off += b.length; }
+    return new Buffer(u);
+  }
+  get length() { return this.data.length; }
+  writeUInt16BE(v, off) { this.data[off] = (v >> 8) & 0xff; this.data[off + 1] = v & 0xff; }
+  writeUInt32BE(v, off) {
+    this.data[off] = (v >>> 24) & 0xff; this.data[off + 1] = (v >>> 16) & 0xff;
+    this.data[off + 2] = (v >>> 8) & 0xff; this.data[off + 3] = v & 0xff;
+  }
+  readUInt16BE(off) { return ((this.data[off] << 8) | this.data[off + 1]) >>> 0; }
+  readUInt32BE(off) {
+    return ((this.data[off] << 24) | (this.data[off + 1] << 16) | (this.data[off + 2] << 8) | this.data[off + 3]) >>> 0;
+  }
+  slice(a, b) { return new Buffer(this.data.slice(a, b)); }
+  toString(enc) {
+    if (enc === 'hex') { let s = ''; for (const x of this.data) s += x.toString(16).padStart(2, '0'); return s; }
+    let s = ''; for (const x of this.data) s += String.fromCharCode(x); return s;
+  }
+  [Symbol.iterator]() { return this.data[Symbol.iterator](); }
+}
+if (typeof atob !== 'function') {
+  globalThis.atob = (s) => {
+    const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let out = '', buf = 0, bits = 0;
+    for (const c of s) {
+      if (c === '=') break;
+      const v = b64.indexOf(c);
+      if (v < 0) continue;
+      buf = (buf << 6) | v; bits += 6;
+      if (bits >= 8) { bits -= 8; out += String.fromCharCode((buf >> bits) & 0xff); }
+    }
+    return out;
+  };
+}
+
 // 上游：CF Gateway DoH（海外节点可达）
 // ECH：从 cloudflare-ech.com 的 HTTPS 记录获取（缓存到 KV）
 
@@ -72,14 +139,14 @@ function decodeName(buf, off) {
   let jumpTarget = -1;
   let guard = 0;
   while (guard++ < 64) {
-    const len = buf[pos];
+    const len = buf.data[pos];
     if (len === 0) {
       pos += 1;
       break;
     }
     if ((len & 0xC0) === 0xC0) {
       if (!jumped) {
-        jumpTarget = ((len & 0x3F) << 8) | buf[pos + 1];
+        jumpTarget = ((len & 0x3F) << 8) | buf.data[pos + 1];
       }
       pos += 2;
       jumped = true;
@@ -253,35 +320,85 @@ async function getECH(env) {
   return ech;
 }
 
-// ---------- 配置（2026-08-17：EdgeOne 无数据库版 —— env 变量 + 内存缓存）----------
-// env.RULES_JSON = {"x.com":{"ips":["172.64.146.66"],"ech":true}, ...}
-// env.OVERRIDES_JSON = [{"name":"谷歌全家桶","domains":["google.com"],"ips":[],"ech":true}, ...]
-// env.FALLBACK_IP / env.GLOBAL_ECH
-const _cfgCache = { rules: null, overrides: null, cfg: null, ts: 0 };
+// ---------- 配置（2026-08-17：EdgeOne 直连 Turso —— libsql HTTP API）----------
+// 配置源：Turso cfg 表（env.TURSO_URL + env.TURSO_TOKEN），60s 内存缓存；
+// API 不可用时兜底 env.RULES_JSON / env.OVERRIDES_JSON。
+const _cfgCache = { rules: null, overrides: null, ts: 0 };
 
-function loadRules(env) {
-  if (_cfgCache.rules && Date.now() - _cfgCache.ts < 60000) return _cfgCache.rules;
+async function fetchRemoteConfig(env) {
+  if (_cfgCache.rules && Date.now() - _cfgCache.ts < 60000) return _cfgCache;
+  // 2026-08-17：EdgeOne env set 静默失败（CLI 限制），URL/token 用部署时注入的
+  // 占位符（deploy 脚本 sed 替换，不进仓库）；env 存在时优先 env。
+  const url = (env && env.TURSO_URL) || 'https://doh-anglesgirl.aws-ap-northeast-1.turso.io';
+  const token = (env && env.TURSO_TOKEN) || '__TURSO_TOKEN__';
+  if (!url || !token || token.startsWith('__')) return null;
+  // 2026-08-17：必须带 /v2/pipeline（libsql 根路径要 statements 格式）
+  const apiUrl = url.includes('/v2/pipeline') ? url : url.replace(/\/$/, '') + '/v2/pipeline';
   try {
-    _cfgCache.rules = JSON.parse(env.RULES_JSON || '{}');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    const r = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql: 'SELECT cfg_key, cfg_value FROM cfg' } }] }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!r.ok) {
+      return null;
+    }
+    const j = await r.json();
+    const rows = (j.results && j.results[0] && j.results[0].response && j.results[0].response.result && j.results[0].response.result.rows) || [];
+    const rules = {};
+    let pool = '';
+    for (const row of rows) {
+      const k = row[0] && row[0].value;
+      const v = row[1] ? String(row[1].value) : '';
+      if (k === 'overrides') {
+        for (const part of v.replace(/;$/, '').split(';')) {
+          if (!part.includes('=')) continue;
+          const [host, ips] = part.split('=', 2);
+          rules[host.trim()] = { ips: ips.split(',').map(s => s.trim()).filter(Boolean), ech: true };
+        }
+      } else if (k === 'pool') {
+        pool = v;
+      }
+    }
+    _cfgCache.rules = rules;
+    _cfgCache.pool = pool;
+    _cfgCache.overrides = [];
     _cfgCache.ts = Date.now();
-  } catch (e) { _cfgCache.rules = {}; }
-  return _cfgCache.rules;
+    return _cfgCache;
+  } catch (e) {
+    return null;
+  }
 }
 
-function loadOverrides(env) {
+async function loadRules(env) {
+  const rc = await fetchRemoteConfig(env);
+  if (rc && Object.keys(rc.rules).length > 0) return rc.rules;
   try {
-    return JSON.parse(env.OVERRIDES_JSON || '[]');
+    return JSON.parse((env && env.RULES_JSON) || '{}');
+  } catch (e) { return {}; }
+}
+
+async function loadOverrides(env) {
+  try {
+    return JSON.parse((env && env.OVERRIDES_JSON) || '[]');
   } catch (e) { return []; }
 }
 
 async function getGlobalConfig(env) {
-  return { fallbackIp: env.FALLBACK_IP || '', ech: !!env.GLOBAL_ECH };
+  const rc = await fetchRemoteConfig(env);
+  const pool = (rc && rc.pool) || '';
+  const fb = pool.split(',')[0].trim() || (env && env.FALLBACK_IP) || '';
+  return { fallbackIp: fb, ech: !!(env && env.GLOBAL_ECH) };
 }
 
 async function getRule(env, domain) {
   // 查询的域名去掉尾点
   domain = domain.replace(/\.$/, '');
-  const rules = loadRules(env);
+  const rules = await loadRules(env);
   // 直接匹配（含子域：x.com 规则覆盖 api.x.com —— 后缀匹配）
   for (const [k, v] of Object.entries(rules)) {
     const kd = String(k).toLowerCase().replace(/\.$/, '');
@@ -297,7 +414,7 @@ async function getRule(env, domain) {
 // 返回该集合的覆写 IP + ech 标志。如「谷歌全家桶」domains=[google.com,...] 命中含子域。
 async function getOverrideMatch(env, qname) {
   const n = qname.toLowerCase().replace(/\.$/, '');
-  for (const row of loadOverrides(env)) {
+  for (const row of await loadOverrides(env)) {
     const doms = Array.isArray(row.domains) ? row.domains : [];
     for (const g of doms) {
       const gd = String(g).toLowerCase().replace(/\.$/, '');
@@ -318,18 +435,19 @@ async function getOverrideMatch(env, qname) {
 
 // ---------- 主处理 ----------
 
-export default {
-  async fetch(request, env) {
-    try {
-      return await handleRequest(request, env);
-    } catch (e) {
-      return new Response(JSON.stringify({ error: String(e), stack: String(e && e.stack || '') }), {
-        status: 500,
-        headers: { 'content-type': 'application/json' },
-      });
-    }
+// 2026-08-17：Edge Functions 格式（官方文档）—— default export + context
+export default async function onRequest(context) {
+  const request = context.request;
+  const env = context.env;
+  try {
+    return await handleRequest(request, env);
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e), stack: String(e && e.stack || '') }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    });
   }
-};
+}
 
 async function handleRequest(request, env) {
   const url = new URL(request.url);
@@ -394,7 +512,7 @@ async function handleRequest(request, env) {
     const hdr = Buffer.alloc(12);
     try { hdr.writeUInt16BE(qbuf ? qbuf.readUInt16BE(0) : 0x1234, 0); } catch (e) { hdr.writeUInt16BE(0x1234, 0); }
     hdr.writeUInt16BE(0x8180, 2); // QR + RD + RA, RCODE=0, 0 answers
-    return new Response(hdr, {
+    return new Response(hdr.data, {
       headers: { 'content-type': 'application/dns-message', 'cache-control': 'max-age=300' },
     });
   }
@@ -522,7 +640,7 @@ async function handleRequest(request, env) {
 
   // 响应 Content-Type：浏览器/系统 DoH 探测要求 application/dns-message 才认可。
   // 真正规避 GFW 靠干净的域名（res.），路径/Content-Type 必须标准否则浏览器不认。
-  return new Response(respBuf, {
+  return new Response(respBuf.data, {
     headers: {
       'content-type': 'application/dns-message',
       'cache-control': 'max-age=300',
@@ -586,7 +704,7 @@ function authAdmin(request, env) {
 const NO_DB_MSG = 'EdgeOne 无数据库版：配置存环境变量（env.RULES_JSON / env.OVERRIDES_JSON / env.FALLBACK_IP / env.GLOBAL_ECH），用 edgeone makers env set 修改后重新部署';
 
 async function listRules(env) {
-  return Object.entries(loadRules(env)).map(([domain, v]) => ({ domain, ips: (v.ips || []), ech: !!v.ech }));
+  return Object.entries(await loadRules(env)).map(([domain, v]) => ({ domain, ips: (v.ips || []), ech: !!v.ech }));
 }
 
 async function addRule(env, domain, ips, ech) {
