@@ -4,7 +4,7 @@ set -e
 cd /root/work/edgeone-doh
 export EO_TOKEN=$(cat /root/.edgeone-token)
 TT=$(cat /root/.turso-token)
-FILES="edge-functions/index.js"
+FILES="edge-functions/dns-query.js edge-functions/admin.js edge-functions/kv.js"
 for F in $FILES; do
   sed -i "s|__TURSO_TOKEN__|$TT|g" "$F"
 done

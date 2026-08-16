@@ -1084,6 +1084,11 @@ async function handleProfile(env) {
 // 所有路径在此分发：/dns-query /resolve /api/v1/sync /api → DoH
 // /admin* → 管理后台；/kv → KV 配置管理；/profile.mobileconfig → iOS 描述文件
 export default async function onRequest(context) {
+  const url = new URL(context.request.url);
+  const path = url.pathname;
+  if (path !== '/dns-query' && path !== '/resolve' && path !== '/api/v1/sync' && path !== '/api') {
+    return new Response('not found', { status: 404 });
+  }
   try {
     return await handleRequest(context.request, context.env);
   } catch (e) {
