@@ -1,35 +1,9 @@
 {
-  "$schema": "https://edgeone.ai/edgeone.schema.json",
   "functions": [
-    {
-      "path": "dns-query",
-      "function": "index",
-      "method": ["GET", "POST"]
-    },
-    {
-      "path": "resolve",
-      "function": "index",
-      "method": ["GET", "POST"]
-    },
-    {
-      "path": "admin",
-      "function": "admin",
-      "method": ["GET", "POST", "DELETE", "PUT"]
-    },
-    {
-      "path": "admin/config",
-      "function": "admin",
-      "method": ["GET", "PUT"]
-    },
-    {
-      "path": "admin/api",
-      "function": "admin",
-      "method": ["GET", "POST", "DELETE"]
-    },
-    {
-      "path": "profile.mobileconfig",
-      "function": "profile.mobileconfig",
-      "method": ["GET"]
-    }
+    { "path": "dns-query", "function": "index", "method": ["GET", "POST"] },
+    { "path": "resolve", "function": "index", "method": ["GET", "POST"] },
+    { "path": "admin", "function": "index", "method": ["GET", "POST", "DELETE", "PUT"] },
+    { "path": "kv", "function": "index", "method": ["GET", "POST", "DELETE", "PUT"] },
+    { "path": "profile.mobileconfig", "function": "index", "method": ["GET"] }
   ]
 }
