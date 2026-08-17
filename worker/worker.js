@@ -65,21 +65,23 @@ function encodeName(name) {
 }
 
 function decodeName(buf, off) {
-  // 返回 {name, nextOff}，支持压缩指针
+  // 2026-08-17：纯 Uint8Array 解析（CF Workers 的 Buffer 与 Node 行为有差异：
+  // readUInt16BE/slice/toString 不可靠 → 全部手动字节操作）
+  const b = (buf && buf.data) ? buf.data : buf; // 兼容 polyfill Buffer(.data) / 原生 Buffer / Uint8Array
   let labels = [];
   let pos = off;
   let jumped = false;
   let jumpTarget = -1;
   let guard = 0;
   while (guard++ < 64) {
-    const len = buf[pos];
+    const len = b[pos];
     if (len === 0) {
       pos += 1;
       break;
     }
     if ((len & 0xC0) === 0xC0) {
       if (!jumped) {
-        jumpTarget = ((len & 0x3F) << 8) | buf[pos + 1];
+        jumpTarget = ((len & 0x3F) << 8) | b[pos + 1];
       }
       pos += 2;
       jumped = true;
@@ -87,11 +89,13 @@ function decodeName(buf, off) {
       pos = jumpTarget;
       continue;
     }
-    labels.push(buf.slice(pos + 1, pos + 1 + len).toString('ascii'));
+    // 手动 ASCII 解码（避免 Buffer.toString('ascii') 差异）
+    let s = '';
+    for (let i = pos + 1; i < pos + 1 + len; i++) s += String.fromCharCode(b[i]);
+    labels.push(s);
     pos += 1 + len;
   }
   let nextOff = jumped ? off + 2 : pos;
-  // 跳过压缩指针后的 2 字节（如果跳转发生，nextOff 是原始偏移+2）
   return { name: labels.join('.'), nextOff };
 }
 
@@ -424,7 +428,7 @@ async function handleRequest(request, env) {
     const d = decodeName(qbuf, off);
     qname = d.name;
     qnameWire = qbuf.slice(off, d.nextOff); // name wire（nextOff 是 name 结束位置，type 之前）
-    qtype = qbuf.readUInt16BE(d.nextOff);
+    qtype = (qbuf[d.nextOff] << 8) | qbuf[d.nextOff + 1]; // 手动读 type（避免 Buffer 差异）
     off = d.nextOff + 4;
     break; // 只处理第一个 question
   }
@@ -637,19 +641,46 @@ async function listOverrides(env) {
 }
 
 async function upsertOverride(env, name, domains, ips, ech) {
-  return { ok: false, error: NO_DB_MSG };
+  try {
+    // 2026-08-17：改回 D1 写（EdgeOne 无库提示是改造残留）
+    await env.DB.prepare(`DELETE FROM overrides WHERE name = ?`).bind(name).run();
+    await env.DB.prepare(`INSERT INTO overrides (name, domains, ips, ech) VALUES (?, ?, ?, ?)`)
+      .bind(name, JSON.stringify(domains), JSON.stringify(ips), ech ? 1 : 0).run();
+    _cfgCache.ts = 0;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 async function delOverride(env, name) {
-  return { ok: false, error: NO_DB_MSG };
+  try {
+    await env.DB.prepare(`DELETE FROM overrides WHERE name = ?`).bind(name).run();
+    _cfgCache.ts = 0;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 async function getGlobal(env) {
-  return { fallbackIp: env.FALLBACK_IP || '', ech: !!env.GLOBAL_ECH };
+  // 2026-08-17：D1 config 表优先（可管理），兜底 env
+  try {
+    const row = await env.DB.prepare(`SELECT fallback_ip, ech FROM config WHERE id = 1`).first();
+    if (row) return { fallbackIp: row.fallback_ip || '', ech: !!row.ech };
+  } catch (e) {}
+  return { fallbackIp: env.FALLBACK_IP || '', ech: !!(env && env.GLOBAL_ECH) };
 }
 
 async function setGlobal(env, cfg) {
-  return { ok: false, error: NO_DB_MSG };
+  try {
+    await env.DB.prepare(`UPDATE config SET fallback_ip = ?, ech = ? WHERE id = 1`)
+      .bind(cfg.fallbackIp || '', cfg.ech ? 1 : 0).run();
+    _cfgCache.ts = 0;
+    return await getGlobal(env);
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 function renderUI(env) {
