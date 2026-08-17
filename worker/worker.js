@@ -5,6 +5,9 @@
 // ECH：从 cloudflare-ech.com 的 HTTPS 记录获取（缓存到 KV）
 
 const ECH_SOURCE = 'cloudflare-ech.com';
+// 2026-08-17：视频域名强制 IPv6（IPv4 谷歌全段封，只有 IPv6 国内可达）：
+// googlevideo.com / c.youtube.com 及子域 → A 清空（不返回 IPv4），AAAA 透传保留
+const IPV6_ONLY = ['googlevideo.com', 'c.youtube.com'];
 // 2026-08-17：上游从 D1 config 表读取（改库即生效，不重新部署）；兜底内置
 const FALLBACK_UPSTREAMS = [
   'https://pieqllv9i7.cloudflare-gateway.com/dns-query',
@@ -471,7 +474,11 @@ async function handleRequest(request, env) {
   const gcfg = await getGlobalConfig(env);
   let answers = [];
 
-  if (override && override.ips && override.ips.length > 0 && qtype === 1) {
+  const _qnameLower = qname.toLowerCase();
+  // 2026-08-17：视频域名强制 IPv6（A 清空，只走 AAAA）
+  if (qtype === 1 && IPV6_ONLY.some((d) => _qnameLower === d || _qnameLower.endsWith('.' + d))) {
+    answers = [];
+  } else if (override && override.ips && override.ips.length > 0 && qtype === 1) {
     // 覆写集合命中（如「谷歌全家桶」）：返回覆写 IP；ech 按集合设置
     answers = buildAAnswer(qnameWire, qtype, override.ips, 300);
   } else if (rule && rule.ips && rule.ips.length > 0 && qtype === 1) {
