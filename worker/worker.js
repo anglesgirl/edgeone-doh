@@ -5,8 +5,8 @@
 // ECH：从 cloudflare-ech.com 的 HTTPS 记录获取（缓存到 KV）
 
 const ECH_SOURCE = 'cloudflare-ech.com';
-// 2026-08-17：上游全部改为用户 CF Gateway（Zero Trust，谷歌段有特殊处理）
-const UPSTREAMS = [
+// 2026-08-17：上游从 D1 config 表读取（改库即生效，不重新部署）；兜底内置
+const FALLBACK_UPSTREAMS = [
   'https://pieqllv9i7.cloudflare-gateway.com/dns-query',
   'https://al62jgpda0.cloudflare-gateway.com/dns-query',
   'https://2w59vnepne.cloudflare-gateway.com/dns-query',
@@ -16,6 +16,19 @@ const UPSTREAMS = [
   'https://xzam891f5d.cloudflare-gateway.com/dns-query',
 ];
 let _upIdx = 0;
+
+async function loadUpstreams(env) {
+  try {
+    if (env && env.DB) {
+      const row = await env.DB.prepare('SELECT upstreams FROM config WHERE id = 1').first();
+      if (row && row.upstreams) {
+        const arr = JSON.parse(row.upstreams);
+        if (Array.isArray(arr) && arr.length > 0) return arr;
+      }
+    }
+  } catch (e) {}
+  return FALLBACK_UPSTREAMS;
+}
 
 const KV_ECH_TTL = 300; // 5 分钟
 
@@ -174,15 +187,16 @@ function buildHTTPSAnswer(qnameWire, echB64, ttl) {
 
 // 谷歌未指定域名（锁 IP）也走 gateway 上游（用户 2026-08-17：统一 CF Gateway）
 
-async function pickUpstream(qname) {
-  // 轮换：避免单点，失败有兜底
-  const base = UPSTREAMS[_upIdx % UPSTREAMS.length];
-  _upIdx = (_upIdx + 1) % UPSTREAMS.length;
+async function pickUpstream(qname, env) {
+  const list = await loadUpstreams(env);
+  const base = list[_upIdx % list.length];
+  _upIdx = (_upIdx + 1) % list.length;
   return base;
 }
 
 async function upstreamJSON(name, type, env) {
-  const base = await pickUpstream(name.toLowerCase());
+  const list = await loadUpstreams(env);
+  const base = list[_upIdx % list.length];
   const url = `${base}?name=${encodeURIComponent(name)}&type=${type}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 8000);
@@ -194,9 +208,9 @@ async function upstreamJSON(name, type, env) {
     if (!resp.ok) return null;
     return await resp.json();
   } catch (e) {
-    // 换一个 gateway 重试
+    // 换一个上游重试
     try {
-      const url2 = `${UPSTREAMS[_upIdx % UPSTREAMS.length]}?name=${encodeURIComponent(name)}&type=${type}`;
+      const url2 = `${list[(_upIdx + 1) % list.length]}?name=${encodeURIComponent(name)}&type=${type}`;
       const resp2 = await fetch(url2, {
         headers: { Accept: 'application/dns-json' },
         signal: ctrl.signal,
@@ -936,6 +950,33 @@ async function handleAdmin(request, env, url) {
       return new Response(JSON.stringify({ ok: true, ...g }), {
         headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
       });
+    }
+  }
+  if (path === '/admin/upstreams') {
+    if (request.method === 'GET') {
+      const list = await loadUpstreams(env);
+      return new Response(JSON.stringify({ ok: true, upstreams: list }), {
+        headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
+    if (request.method === 'PUT') {
+      const body = await request.json();
+      const arr = Array.isArray(body.upstreams) ? body.upstreams : [];
+      if (arr.length === 0) {
+        return new Response(JSON.stringify({ ok: false, error: 'empty' }), {
+          headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+      try {
+        await env.DB.prepare('UPDATE config SET upstreams = ? WHERE id = 1').bind(JSON.stringify(arr)).run();
+        return new Response(JSON.stringify({ ok: true, upstreams: arr }), {
+          headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: String(e) }), {
+          headers: { 'content-type': 'application/json; charset=UTF-8', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
     }
   }
   if (path === '/admin/override') {
