@@ -5,10 +5,17 @@
 // ECH：从 cloudflare-ech.com 的 HTTPS 记录获取（缓存到 KV）
 
 const ECH_SOURCE = 'cloudflare-ech.com';
+// 2026-08-17：上游全部改为用户 CF Gateway（Zero Trust，谷歌段有特殊处理）
 const UPSTREAMS = [
-  'https://1.1.1.1/dns-query',           // CF DoH IP 直连（2026-08-17：cloudflare-dns.com 域名在 Workers 环境被 WAF 拦 1010，换 IP 版）
-  'https://dns.google/resolve',           // Google 公共 DoH（dns-query 也支持）
+  'https://pieqllv9i7.cloudflare-gateway.com/dns-query',
+  'https://al62jgpda0.cloudflare-gateway.com/dns-query',
+  'https://2w59vnepne.cloudflare-gateway.com/dns-query',
+  'https://dz1598pphb.cloudflare-gateway.com/dns-query',
+  'https://e6i0vltnvu.cloudflare-gateway.com/dns-query',
+  'https://m2b4x7vw98.cloudflare-gateway.com/dns-query',
+  'https://xzam891f5d.cloudflare-gateway.com/dns-query',
 ];
+let _upIdx = 0;
 
 const KV_ECH_TTL = 300; // 5 分钟
 
@@ -165,14 +172,13 @@ function buildHTTPSAnswer(qnameWire, echB64, ttl) {
 
 // ---------- 上游查询（JSON 格式） ----------
 
-// 谷歌未指定域名（锁 IP，不能强改）→ 转发 Google DNS(8.8.8.8) 解析（用户指定 2026-08-17）
-const GOOGLE_UPSTREAM_DOMAINS = ['googlevideo.com'];
+// 谷歌未指定域名（锁 IP）也走 gateway 上游（用户 2026-08-17：统一 CF Gateway）
 
 async function pickUpstream(qname) {
-  if (GOOGLE_UPSTREAM_DOMAINS.some((d) => qname === d || qname.endsWith('.' + d))) {
-    return 'https://dns.google/resolve';
-  }
-  return UPSTREAMS[0];
+  // 轮换：避免单点，失败有兜底
+  const base = UPSTREAMS[_upIdx % UPSTREAMS.length];
+  _upIdx = (_upIdx + 1) % UPSTREAMS.length;
+  return base;
 }
 
 async function upstreamJSON(name, type, env) {
@@ -188,9 +194,9 @@ async function upstreamJSON(name, type, env) {
     if (!resp.ok) return null;
     return await resp.json();
   } catch (e) {
-    // 尝试 Google（兜底）
+    // 换一个 gateway 重试
     try {
-      const url2 = `${UPSTREAMS[1]}?name=${encodeURIComponent(name)}&type=${type}`;
+      const url2 = `${UPSTREAMS[_upIdx % UPSTREAMS.length]}?name=${encodeURIComponent(name)}&type=${type}`;
       const resp2 = await fetch(url2, {
         headers: { Accept: 'application/dns-json' },
         signal: ctrl.signal,
