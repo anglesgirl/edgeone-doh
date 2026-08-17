@@ -159,13 +159,15 @@ function buildAAnswer(qnameWire, qtype, ips, ttl) {
 }
 
 function makeRR(nameWire, rtype, ttl, rdata) {
-  // name(压缩指针 0xC00C) + type + class + ttl + rdlength + rdata = 12 字节头
-  const head = Buffer.alloc(12);
-  head.writeUInt16BE(0xC00C, 0); // 指针到偏移 12
-  head.writeUInt16BE(rtype, 2);
-  head.writeUInt16BE(1, 4); // IN
-  head.writeUInt32BE(ttl, 6);
-  head.writeUInt16BE(rdata.length, 10); // rdlength
+  // 2026-08-17：name 用传入的 nameWire（不再硬编码 0xC00C —— CNAME 链后的
+  // A/AAAA owner 必须是 CNAME 目标，不能压缩指向查询名）
+  const nb = (nameWire && nameWire.length) ? nameWire : Buffer.from([0xC0, 0x0C]);
+  const head = Buffer.alloc(10 + nb.length);
+  nb.copy(head, 0);
+  head.writeUInt16BE(rtype, nb.length);
+  head.writeUInt16BE(1, nb.length + 2); // IN
+  head.writeUInt32BE(ttl, nb.length + 4);
+  head.writeUInt16BE(rdata.length, nb.length + 8); // rdlength
   return Buffer.concat([head, rdata]);
 }
 
@@ -601,13 +603,24 @@ async function handleRequest(request, env) {
 // JSON 应答 → wire answers（支持 A/AAAA/CNAME）
 function jsonToAnswers(qnameWire, qname, jsonAnswers) {
   const out = [];
+  // 2026-08-17：CNAME 链跟踪 —— 链后记录（A/AAAA）的 owner 必须是 CNAME 目标
+  let cnameTarget = null;
   for (const a of jsonAnswers) {
     const type = a.type || 1;
+    // owner：记录自带 name（CNAME 目标后的 A/AAAA 上游会给正确 name）；
+    // 若上游给的是查询名但存在 CNAME，则用 CNAME 目标
+    let owner = qname;
+    if (a.name && a.name !== qname) owner = a.name;
+    else if (cnameTarget) owner = cnameTarget;
+    const ownerWire = (owner === qname) ? qnameWire : encodeName(owner.endsWith('.') ? owner : owner + '.');
+    if (type === 5) {
+      cnameTarget = a.data.endsWith('.') ? a.data.slice(0, -1) : a.data;
+    }
     if (type === 1) {
       const ip = a.data;
       const parts = ip.split('.').map(Number);
       if (parts.length === 4 && parts.every(p => !isNaN(p) && p >= 0 && p <= 255)) {
-        out.push(makeRR(qnameWire, 1, a.TTL || 300, Buffer.from(parts)));
+        out.push(makeRR(ownerWire, 1, a.TTL || 300, Buffer.from(parts)));
       }
     } else if (type === 28) {
       // AAAA
@@ -624,14 +637,14 @@ function jsonToAnswers(qnameWire, qname, jsonAnswers) {
             const b = Buffer.from(g.padStart(4, '0'), 'hex');
             b.copy(bytes, idx); idx += 2;
           }
-          out.push(makeRR(qnameWire, 28, a.TTL || 300, bytes));
+          out.push(makeRR(ownerWire, 28, a.TTL || 300, bytes));
         } catch (e) { /* skip */ }
       }
     } else if (type === 5) {
       // CNAME
       const target = a.data.endsWith('.') ? a.data : a.data + '.';
       const tWire = encodeName(target);
-      out.push(makeRR(qnameWire, 5, a.TTL || 300, tWire));
+      out.push(makeRR(ownerWire, 5, a.TTL || 300, tWire));
     }
   }
   return out;
