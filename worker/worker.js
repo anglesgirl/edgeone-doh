@@ -8,6 +8,8 @@ const ECH_SOURCE = 'cloudflare-ech.com';
 // 2026-08-17：视频域名强制 IPv6（IPv4 谷歌全段封，只有 IPv6 国内可达）：
 // googlevideo.com / c.youtube.com 及子域 → A 清空（不返回 IPv4），AAAA 透传保留
 const IPV6_ONLY = ['googlevideo.com', 'c.youtube.com'];
+// 2026-08-17：x.com 视频 CDN（CF 托管，IPv4 可达但 IPv6 大陆不通）→ 强制 IPv4（AAAA 清空）
+const IPV4_ONLY = ['video.twimg.com'];
 // 2026-08-17：上游从 D1 config 表读取（改库即生效，不重新部署）；兜底内置
 const FALLBACK_UPSTREAMS = [
   'https://pieqllv9i7.cloudflare-gateway.com/dns-query',
@@ -515,9 +517,9 @@ async function handleRequest(request, env) {
       }
     }
   } else if (qtype === 28) {
-    // AAAA（2026-08-17）：规则/覆写命中的域名 → 清空（强制 IPv4，避免浏览器
-    // 拿 IPv6 去连大陆不通的地址）；其他域名透传上游 AAAA
-    if (override || rule) {
+    // AAAA：规则/覆写命中 → 清空（强制 IPv4）；IPV4_ONLY（x.com 视频 CDN）→ 清空；
+    // 其他域名透传上游 AAAA
+    if (override || rule || IPV4_ONLY.some((d) => _qnameLower === d || _qnameLower.endsWith('.' + d))) {
       answers = [];
     } else {
       const jr = await upstreamJSON(qname, qtype, env);
