@@ -68,9 +68,30 @@ async function lookupASN(ipStr, env) {
   return asn;
 }
 
+// CF 公开 IPv4 段匹配（2026-08-17：自主判定"解析到 CF 的域名"—— 不依赖 Team Cymru 反查（不稳定））
+function ipInCF(ipStr) {
+  const p = (ipStr || '').split('.').map(Number);
+  if (p.length < 2) return false;
+  const a = p[0], b = p[1];
+  if (a === 172 && b >= 64 && b <= 127) return true;   // 172.64.0.0/13
+  if (a === 104 && b >= 16 && b <= 31) return true;    // 104.16.0.0/13
+  if (a === 173 && b === 245) return true;             // 173.245.x
+  if (a === 108 && b === 162) return true;             // 108.162.x
+  if (a === 162 && (b === 158 || b === 159)) return true; // 162.158.0.0/15
+  if (a === 141 && b === 101) return true;             // 141.101.x
+  if (a === 188 && b === 114) return true;             // 188.114.x
+  if (a === 190 && b === 93) return true;              // 190.93.x
+  if (a === 198 && b === 41) return true;              // 198.41.x
+  if (a === 103 && (b === 21 || b === 22 || b === 31)) return true;
+  if (a === 197 && b === 234) return true;
+  if (a === 131 && b === 0) return true;
+  return false;
+}
+
 // isCloudflareIP：判断 IP 是否属于 AS13335
 async function isCloudflareIP(ipStr, env) {
-  const asn = await lookupASN(ipStr, env);
+  if (ipInCF(ipStr)) return true; // 段匹配优先（可靠）
+  const asn = await lookupASN(ipStr, env); // 兜底反查
   return asn === '13335';
 }
 
