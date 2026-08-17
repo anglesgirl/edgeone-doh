@@ -5,9 +5,6 @@
 // ECH：从 cloudflare-ech.com 的 HTTPS 记录获取（缓存到 KV）
 
 const ECH_SOURCE = 'cloudflare-ech.com';
-// 2026-08-17：视频 CDN 域名强制 IPv6（A 清空，只留 AAAA 透传 —— YouTube 视频
-// 走 googlevideo.com，IPv4 大陆被墙挂起，IPv6 通道可用）
-const IPV6_ONLY = ['googlevideo.com'];
 const UPSTREAMS = [
   'https://1.1.1.1/dns-query',           // CF DoH IP 直连（2026-08-17：cloudflare-dns.com 域名在 Workers 环境被 WAF 拦 1010，换 IP 版）
   'https://dns.google/resolve',           // Google 公共 DoH（dns-query 也支持）
@@ -168,8 +165,19 @@ function buildHTTPSAnswer(qnameWire, echB64, ttl) {
 
 // ---------- 上游查询（JSON 格式） ----------
 
+// 谷歌未指定域名（锁 IP，不能强改）→ 转发 Google DNS(8.8.8.8) 解析（用户指定 2026-08-17）
+const GOOGLE_UPSTREAM_DOMAINS = ['googlevideo.com'];
+
+async function pickUpstream(qname) {
+  if (GOOGLE_UPSTREAM_DOMAINS.some((d) => qname === d || qname.endsWith('.' + d))) {
+    return 'https://dns.google/resolve';
+  }
+  return UPSTREAMS[0];
+}
+
 async function upstreamJSON(name, type, env) {
-  const url = `${UPSTREAMS[0]}?name=${encodeURIComponent(name)}&type=${type}`;
+  const base = await pickUpstream(name.toLowerCase());
+  const url = `${base}?name=${encodeURIComponent(name)}&type=${type}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
@@ -180,7 +188,7 @@ async function upstreamJSON(name, type, env) {
     if (!resp.ok) return null;
     return await resp.json();
   } catch (e) {
-    // 尝试 Google
+    // 尝试 Google（兜底）
     try {
       const url2 = `${UPSTREAMS[1]}?name=${encodeURIComponent(name)}&type=${type}`;
       const resp2 = await fetch(url2, {
@@ -443,10 +451,7 @@ async function handleRequest(request, env) {
   const gcfg = await getGlobalConfig(env);
   let answers = [];
 
-  if (IPV6_ONLY.some((d) => qname.toLowerCase() === d || qname.toLowerCase().endsWith('.' + d)) && qtype === 1) {
-    // 2026-08-17：视频 CDN 域名强制 IPv6（清 A，只走 AAAA 透传）
-    answers = [];
-  } else if (override && override.ips && override.ips.length > 0 && qtype === 1) {
+  if (override && override.ips && override.ips.length > 0 && qtype === 1) {
     // 覆写集合命中（如「谷歌全家桶」）：返回覆写 IP；ech 按集合设置
     answers = buildAAnswer(qnameWire, qtype, override.ips, 300);
   } else if (rule && rule.ips && rule.ips.length > 0 && qtype === 1) {
